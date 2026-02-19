@@ -31,10 +31,14 @@ Each clip was produced in horizontal and vertical formats. A matching `.vtt` sub
 
 ### 1. Extract a clip (horizontal)
 
+Always include `-pix_fmt yuv420p -movflags +faststart` for macOS QuickTime/Photos compatibility.
+
 ```bash
 ffmpeg -y -ss [START_SECONDS] -to [END_SECONDS] \
   -i input.mov \
-  -c:v libx264 -preset fast -crf 23 -c:a aac \
+  -c:v libx264 -preset fast -crf 23 \
+  -pix_fmt yuv420p -movflags +faststart \
+  -c:a aac \
   output_horizontal.mp4
 ```
 
@@ -44,7 +48,9 @@ ffmpeg -y -ss [START_SECONDS] -to [END_SECONDS] \
 ffmpeg -y -ss [START_SECONDS] -to [END_SECONDS] \
   -i input.mov \
   -vf "crop=608:1080:656:0" \
-  -c:v libx264 -preset fast -crf 23 -c:a aac \
+  -c:v libx264 -preset fast -crf 23 \
+  -pix_fmt yuv420p -movflags +faststart \
+  -c:a aac \
   output_vertical.mp4
 ```
 
@@ -54,19 +60,7 @@ ffmpeg -y -ss [START_SECONDS] -to [END_SECONDS] \
 > - X offset: `656` (= (1920 − 608) / 2, centers the crop)
 > - Y offset: `0`
 
-### 3. Fix macOS QuickTime/Photos compatibility
-
-If QuickTime or the Photos app rejects the file, re-encode with `yuv420p` pixel format:
-
-```bash
-ffmpeg -y -i input.mp4 \
-  -c:v libx264 -preset fast -crf 23 \
-  -pix_fmt yuv420p -movflags +faststart \
-  -c:a aac \
-  output_fixed.mp4
-```
-
-### 4. Generate adjusted VTT subtitles for a clip
+### 3. Generate adjusted VTT subtitles for a clip
 
 Use the included `adjust_vtt.py` script:
 

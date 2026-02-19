@@ -47,13 +47,15 @@ ffprobe -v error -select_streams v:0 \
 
 ### Step 4 — Extract clips
 
-For each clip, run horizontal and vertical versions in parallel as background tasks.
+For each clip, run horizontal and vertical versions in parallel as background tasks. Always include `-pix_fmt yuv420p -movflags +faststart` so output files are compatible with QuickTime and the macOS Photos app.
 
 **Horizontal (full frame):**
 ```bash
 ffmpeg -y -ss [START] -to [END] \
   -i "/path/to/video.mov" \
-  -c:v libx264 -preset fast -crf 23 -c:a aac \
+  -c:v libx264 -preset fast -crf 23 \
+  -pix_fmt yuv420p -movflags +faststart \
+  -c:a aac \
   output_horizontal.mp4
 ```
 
@@ -62,24 +64,15 @@ ffmpeg -y -ss [START] -to [END] \
 ffmpeg -y -ss [START] -to [END] \
   -i "/path/to/video.mov" \
   -vf "crop=608:1080:656:0" \
-  -c:v libx264 -preset fast -crf 23 -c:a aac \
+  -c:v libx264 -preset fast -crf 23 \
+  -pix_fmt yuv420p -movflags +faststart \
+  -c:a aac \
   output_vertical.mp4
 ```
 
 Use `run_in_background: true` and wait for all tasks before reporting results.
 
-### Step 5 — Fix macOS compatibility (if needed)
-
-If the user reports QuickTime or Photos rejecting the file, re-encode:
-
-```bash
-ffmpeg -y -i input.mp4 \
-  -c:v libx264 -preset fast -crf 23 \
-  -pix_fmt yuv420p -movflags +faststart \
-  -c:a aac output_fixed.mp4
-```
-
-### Step 6 — Generate VTT subtitles for a clip (optional)
+### Step 5 — Generate VTT subtitles for a clip (optional)
 
 If the user wants a subtitle file for a clip, use this Python snippet to filter and re-zero the timestamps:
 
