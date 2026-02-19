@@ -4,8 +4,8 @@ A workflow for extracting highlight clips from speech videos using VTT subtitle 
 
 ## What It Does
 
-1. Reads an auto-generated VTT subtitle file from a video platform (e.g. Vimeo)
-2. Identifies the most interesting/quotable moments with timestamps
+1. Reads an auto-generated VTT subtitle file from a video platform (e.g. Vimeo). You can also use OpenAI Whisper to transcribe audio, but I didn't use that because I already had the VTT subtitle file that Vimeo generated. 
+2. Identifies the most interesting or quotable moments with timestamps
 3. Extracts those moments as individual MP4 clips or combined segments
 4. Produces both horizontal (1920×1080) and vertical center-cropped (608×1080, 9:16) versions of each clip
 5. Generates adjusted VTT subtitle files for each clip, with timestamps re-zeroed to the clip start
@@ -19,7 +19,7 @@ This workflow was developed while processing Illinois Governor Pritzker's Februa
 - **Clips 3–9 combined** (0:32–2:17) — Housing diagnosis through policy announcement
 - **Clip 10+** (2:05–end) — "Building Up Illinois" plan detail
 
-Each clip was produced in horizontal and vertical formats. A matching `.vtt` subtitle file was generated for the combined clip.
+Each clip was produced in horizontal and vertical formats. A matching `.vtt` subtitle file was generated for the combined clip (which can be uploaded to Bluesky which will show them as closed captions).
 
 ## Requirements
 
