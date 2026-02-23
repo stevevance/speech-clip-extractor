@@ -11,6 +11,30 @@ Use this skill when the user wants to extract highlight clips from a speech or p
 
 ## Workflow
 
+### Step 0 — Generate subtitles (if no VTT file exists)
+
+**Preferred tool: `mlx-whisper`** — runs natively on Apple Silicon (arm64) using the Neural Engine/GPU. Much faster than OpenAI Whisper on CPU.
+
+> **Requirement**: mlx-whisper only installs on arm64 Python. Use Homebrew Python, not Anaconda (which runs as x86_64 under Rosetta).
+
+Install into a temporary venv:
+```bash
+/opt/homebrew/bin/python3.14 -m venv /tmp/mlx-venv
+/tmp/mlx-venv/bin/pip install mlx-whisper
+```
+
+Run transcription:
+```bash
+/tmp/mlx-venv/bin/mlx_whisper "/path/to/video.mp4" \
+  --model mlx-community/whisper-medium-mlx \
+  --output-format vtt \
+  --output-dir /path/to/output/dir
+```
+
+The VTT file will be saved alongside the video with the same base filename.
+
+---
+
 ### Step 1 — Read the VTT file
 
 Read the `.vtt` subtitle file to understand the full transcript with timestamps.
