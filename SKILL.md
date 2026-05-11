@@ -14,9 +14,11 @@ Use this skill when the user wants to extract highlight clips from a speech or p
 
 Use `yt-dlp` with Safari cookies to bypass YouTube's bot detection. This is required — direct downloads without cookies will 403.
 
+**IMPORTANT**: Always use the format string below that forces H.264 (avc) video. YouTube's default "best" format often selects AV1 or VP9, which QuickTime cannot play.
+
 ```bash
 /opt/homebrew/bin/yt-dlp --cookies-from-browser safari \
-  -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]" \
+  -f "bestvideo[vcodec^=avc][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4][vcodec!=av1][vcodec!=vp9]+bestaudio[ext=m4a]/best[ext=mp4]" \
   --ffmpeg-location /opt/homebrew/bin/ffmpeg \
   --concurrent-fragments 5 \
   -o "/Users/stevevance/Downloads/%(title)s.%(ext)s" \
@@ -26,7 +28,18 @@ Use `yt-dlp` with Safari cookies to bypass YouTube's bot detection. This is requ
 - `--cookies-from-browser safari` — required to avoid 403 errors; user must be logged into YouTube in Safari
 - `--concurrent-fragments 5` — downloads 5 segments in parallel for speed; safe up to ~10
 - `--ffmpeg-location` — required for merging video+audio streams
+- `vcodec^=avc` — forces H.264 (avc1), which QuickTime supports natively; AV1 and VP9 are not QuickTime-compatible
 - Output goes to `~/Downloads/` with the video title as filename
+
+**If the video was already downloaded with the wrong codec** (AV1/VP9), re-encode it:
+```bash
+/opt/homebrew/bin/ffmpeg -y \
+  -i /path/to/input.mp4 \
+  -c:v libx264 -preset fast -crf 23 \
+  -pix_fmt yuv420p -movflags +faststart \
+  -c:a aac -b:a 128k \
+  /path/to/output-h264.mp4
+```
 
 After downloading, proceed to Step 0b or Step 1 depending on whether subtitles are needed.
 
@@ -56,8 +69,11 @@ Run transcription:
   --output-format vtt \
   --output-dir "/path/to/output/dir" \
   --output-name "desired-filename" \
-  --language en
+  --language en \
+  --condition-on-previous-text False
 ```
+
+- `--condition-on-previous-text False` — prevents hallucination loops where whisper gets stuck repeating a word or phrase on quiet/background-noise sections
 
 The VTT file will be saved at `output-dir/desired-filename.vtt`.
 
