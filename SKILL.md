@@ -84,6 +84,14 @@ The VTT file will be saved at `output-dir/desired-filename.vtt`.
 Uses mlx-whisper (M-chip transcription) + pyannote.audio (speaker diarization).
 Requires a HuggingFace token cached at `~/.cache/huggingface/token`.
 
+**IMPORTANT — MP3 inputs**: torchaudio's TorchCodec backend can fail to decode MP3 files. Always convert MP3 to WAV first before running this script:
+```bash
+/opt/homebrew/bin/ffmpeg -y -i "/path/to/input.mp3" \
+  -ar 16000 -ac 1 \
+  "/path/to/input.wav"
+```
+Then pass the `.wav` file to the script instead of the `.mp3`.
+
 Install both libraries if needed:
 ```bash
 /opt/homebrew/bin/pip3.13 install mlx-whisper pyannote.audio --break-system-packages
@@ -95,9 +103,11 @@ Use the script at `/tmp/transcribe-with-diarization.py`. If it doesn't exist, wr
 #!/usr/bin/env python3
 """
 Transcribe with mlx-whisper + pyannote diarization → VTT with [SPEAKER_XX]: labels.
-Usage: /opt/homebrew/bin/python3.13 /tmp/transcribe-with-diarization.py <video> <output.vtt>
+Uses Apple MPS (Metal GPU) for diarization — dramatically faster than CPU on M-chip Macs.
+Usage: /opt/homebrew/bin/python3.13 /tmp/transcribe-with-diarization.py <audio> <output.vtt>
 """
 import sys, os
+import torch
 
 def seconds_to_vtt_ts(s):
     h = int(s // 3600); m = int((s % 3600) // 60); sec = s % 60
@@ -111,7 +121,7 @@ def assign_speaker(seg_start, seg_end, diarization_segments):
             overlap_by_speaker[speaker] = overlap_by_speaker.get(speaker, 0.0) + overlap
     return max(overlap_by_speaker, key=overlap_by_speaker.get) if overlap_by_speaker else "SPEAKER_UNK"
 
-video_path, output_vtt = sys.argv[1], sys.argv[2]
+audio_path, output_vtt = sys.argv[1], sys.argv[2]
 hf_token = open(os.path.expanduser("~/.cache/huggingface/token")).read().strip()
 
 print("Step 1: Transcribing with mlx-whisper large-v3...")
@@ -120,19 +130,30 @@ import mlx_whisper
 # repeating a phrase endlessly when audio is silent or unclear if it conditions on what
 # it just said. Disabling this breaks the feedback loop at the cost of slightly less
 # coherent transitions between chunks, which is acceptable for hearing transcripts.
-result = mlx_whisper.transcribe(video_path, path_or_hf_repo="mlx-community/whisper-large-v3-mlx", language="en", condition_on_previous_text=False, verbose=True)
+result = mlx_whisper.transcribe(audio_path, path_or_hf_repo="mlx-community/whisper-large-v3-mlx", language="en", condition_on_previous_text=False, verbose=True)
 segments = result["segments"]
 
-print("Step 2: Running pyannote diarization...")
+print("Step 2: Running pyannote diarization on MPS (Metal)...")
 from pyannote.audio import Pipeline
 import torchaudio
+
+# Use Apple Metal GPU if available — reduces diarization time from hours to minutes vs CPU
+device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
+print(f"Using device: {device}")
+
 pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=hf_token)
-# Load as waveform dict to avoid chunk-boundary sample-count errors on files
-# whose duration doesn't divide evenly into pyannote's 10-second processing chunks.
-waveform, sample_rate = torchaudio.load(video_path)
+pipeline.to(device)
+
+# backend="ffmpeg" avoids TorchCodec decode errors on some audio formats
+waveform, sample_rate = torchaudio.load(audio_path, backend="ffmpeg")
 diarization = pipeline({"waveform": waveform, "sample_rate": sample_rate})
-# pyannote 4.x returns DiarizeOutput dataclass; Annotation is in .speaker_diarization
-diar_segs = [(t.start, t.end, spk) for t, _, spk in diarization.speaker_diarization.itertracks(yield_label=True)]
+
+# Handle both pyannote 3.x (Annotation) and 4.x (DiarizeOutput dataclass)
+if hasattr(diarization, 'speaker_diarization'):
+    annotation = diarization.speaker_diarization
+else:
+    annotation = diarization
+diar_segs = [(t.start, t.end, spk) for t, _, spk in annotation.itertracks(yield_label=True)]
 
 print("Step 3: Writing VTT...")
 lines = ["WEBVTT", ""]
@@ -338,3 +359,153 @@ ffmpeg filter: crop=crop_width:source_height:x_offset:0
 - For combined segments (multiple clips in one), use a single `-ss` / `-to` range covering all clips
 - Always confirm output file paths with the user before starting if there are many clips
 - Offer to generate a VTT subtitle file for any clip that is longer than ~30 seconds
+
+---
+
+## Audio noise removal
+
+If a recording has a buzzing or background noise (common with live stream captures), use the `afftdn` FFT denoiser before extracting clips:
+
+```bash
+ffmpeg -i /path/to/input.mp4 \
+  -af "afftdn=nf=-25" \
+  -c:v copy \
+  /path/to/input_clean.mp4
+```
+
+- `nf=-25` is the noise floor in dB — lower values (e.g. `-35`) remove more noise but may affect speech quality
+- `-c:v copy` skips video re-encoding for speed
+- Run this on the source file first, then use the cleaned file for clip extraction
+
+A 60Hz electrical hum notch filter is less effective for streaming captures; `afftdn` works better in practice for live stream audio.
+
+---
+
+## Burning open captions into a clip
+
+Homebrew ffmpeg does not include `drawtext` or `subtitles` filters (libass is not compiled in). Use Python/Pillow to render each subtitle cue as a transparent PNG, then chain them as timed overlays in ffmpeg.
+
+**Verified working font:** `/Library/Fonts/ProximaNova-Bold.ttf`
+
+Other confirmed-working options: `/System/Library/Fonts/SFNS.ttf`, `/Library/Fonts/Arial.ttf`
+
+**Do not use `.ttc` font collection files** (e.g. `ArialHB.ttc`, `Helvetica.ttc`) — PIL renders all glyphs as empty boxes.
+
+Write the script fresh at `/tmp/burn-captions.py`:
+
+```python
+#!/usr/bin/env python3
+"""Burn open captions into video using Pillow PNG overlays + ffmpeg overlay filter."""
+import sys, os, re, subprocess, tempfile, shutil
+from PIL import Image, ImageDraw, ImageFont
+
+def ts_to_seconds(ts):
+    parts = ts.strip().split(':')
+    if len(parts) == 3:
+        return int(parts[0])*3600 + int(parts[1])*60 + float(parts[2])
+    return int(parts[0])*60 + float(parts[1])
+
+def parse_vtt(vtt_path):
+    with open(vtt_path) as f:
+        content = f.read()
+    cues = []
+    for block in re.split(r'\n\n+', content.strip()):
+        lines = block.strip().split('\n')
+        timing = next((l for l in lines if '-->' in l), None)
+        if not timing:
+            continue
+        start_ts, end_ts = timing.split('-->')
+        text = ' '.join(l for l in lines if '-->' not in l and not l.strip().isdigit()).strip()
+        if text:
+            cues.append((ts_to_seconds(start_ts), ts_to_seconds(end_ts), text))
+    return cues
+
+def wrap_text(draw, text, font, max_width):
+    words = text.split()
+    lines, current = [], []
+    for word in words:
+        test = ' '.join(current + [word])
+        if draw.textbbox((0,0), test, font=font)[2] > max_width and current:
+            lines.append(' '.join(current))
+            current = [word]
+        else:
+            current.append(word)
+    if current:
+        lines.append(' '.join(current))
+    return lines
+
+def make_caption_png(text, width, height, font_size, output_path):
+    img = Image.new('RGBA', (width, height), (0,0,0,0))
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.truetype('/Library/Fonts/ProximaNova-Bold.ttf', font_size)
+
+    lines = wrap_text(draw, text, font, int(width * 0.85))
+    line_height = font_size + 10
+    total_h = len(lines) * line_height
+    y = height - total_h - 80
+
+    for line in lines:
+        bbox = draw.textbbox((0,0), line, font=font)
+        x = (width - (bbox[2] - bbox[0])) // 2
+        # Black outline
+        for dx, dy in [(-2,0),(2,0),(0,-2),(0,2),(-2,-2),(2,-2),(-2,2),(2,2),(-3,0),(3,0),(0,-3),(0,3)]:
+            draw.text((x+dx, y+dy), line, font=font, fill=(0,0,0,230))
+        # White text
+        draw.text((x, y), line, font=font, fill=(255,255,255,255))
+        y += line_height
+
+    img.save(output_path)
+
+video_in  = sys.argv[1]
+vtt_path  = sys.argv[2]
+video_out = sys.argv[3]
+
+probe = subprocess.run([
+    '/opt/homebrew/bin/ffprobe', '-v', 'error', '-select_streams', 'v:0',
+    '-show_entries', 'stream=width,height', '-of', 'csv=p=0', video_in
+], capture_output=True, text=True)
+width, height = map(int, probe.stdout.strip().split(','))
+
+cues = parse_vtt(vtt_path)
+print(f"Loaded {len(cues)} cues, video {width}x{height}")
+
+tmpdir = tempfile.mkdtemp()
+try:
+    inputs = ['-i', video_in]
+    filter_parts = []
+    prev = '0:v'
+
+    for i, (start, end, text) in enumerate(cues):
+        png = os.path.join(tmpdir, f'cue_{i:04d}.png')
+        make_caption_png(text, width, height, font_size=52, output_path=png)
+        inputs += ['-i', png]
+        out = f'v{i+1}'
+        filter_parts.append(
+            f"[{prev}][{i+1}:v]overlay=0:0:enable='between(t,{start:.3f},{end:.3f})'[{out}]"
+        )
+        prev = out
+
+    cmd = ['/opt/homebrew/bin/ffmpeg', '-y'] + inputs + [
+        '-filter_complex', ';'.join(filter_parts),
+        '-map', f'[{prev}]',
+        '-map', '0:a',
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+        '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+        '-c:a', 'aac', '-b:a', '128k',
+        video_out
+    ]
+    print("Running ffmpeg...")
+    subprocess.run(cmd, check=True)
+    print(f"Done: {video_out}")
+finally:
+    shutil.rmtree(tmpdir)
+```
+
+Run it:
+
+```bash
+/opt/homebrew/bin/python3.13 /tmp/burn-captions.py \
+  "/path/to/input.mp4" \
+  "/path/to/captions.vtt" \
+  "/path/to/output-captioned.mp4"
+```
