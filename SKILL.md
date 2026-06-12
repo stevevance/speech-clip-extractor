@@ -62,6 +62,14 @@ Install if needed:
 /opt/homebrew/bin/pip3.13 install mlx-whisper --break-system-packages
 ```
 
+**If local whisper installs are broken** (e.g. Anaconda's numpy/torch mismatch produces `RuntimeError: Numpy is not available`), run mlx-whisper in an isolated uv environment instead. You must force an arm64 Python — uv may otherwise pick an x86_64 build, and mlx has no x86 wheels:
+```bash
+uvx --python cpython-3.12-macos-aarch64-none --from mlx-whisper mlx_whisper \
+  /path/to/audio.wav \
+  --model mlx-community/whisper-large-v3-turbo \
+  --language en --output-format vtt --output-dir /path/to/out
+```
+
 Run transcription:
 ```bash
 /opt/homebrew/bin/mlx_whisper "/path/to/video.mp4" \
@@ -194,6 +202,8 @@ tail -f /tmp/transcribe-diarize.log
 ```
 
 **Note:** Speaker labels (SPEAKER_00, SPEAKER_01, etc.) are assigned fresh per video — they are not consistent across clips. Cross-reference with the video to identify who each speaker is.
+
+**Caution:** Diarization can also merge two different people into one label, especially similar voices recorded on the same podium mic. In one project, a news clip's SPEAKER_01 turned out to be two different speakers. Before attributing a quote, verify the speaker against the video frames at that timestamp.
 
 ---
 
@@ -509,3 +519,75 @@ Run it:
   "/path/to/captions.vtt" \
   "/path/to/output-captioned.mp4"
 ```
+
+If the recording starts mid-sentence, start the first caption at the first complete phrase and prefix it with `...` to signal the pickup (e.g. `...seeing so many people gathered here`). Curate Whisper's cues before burning: fix mishearings by context ("right up to a meeting" → "ride up to a meeting"), merge cues shorter than ~1.2 s with a neighbor, and drop faint crowd-noise cues Whisper invents during applause.
+
+---
+
+## Multi-angle supercut assembly
+
+Workflow for reconstructing one complete speech from multiple recordings (e.g. a continuous phone video plus broadcast news soundbites). A working reference implementation (four angles, 18 video segments, 9 crossfaded audio regions) lives at `supercut-build/build-supercut.sh` inside the source footage's project folder.
+
+### Architecture
+
+- **Pick the longest continuous recording as the master timeline.** Everything else is expressed as an offset from it. Broadcast clips only contribute soundbites; the master guarantees the speech is complete.
+- **Drive the build from tables in a script**, not hand-run commands: a SEGMENTS table (`t0 t1 video_src offset`) for hard video cuts, and an AUDIO_REGIONS table for the audio mix. Adding an angle later = add rows, re-run.
+- **Cache mezzanines** (tonemapped/conformed intermediates) behind `[ ! -f file ]` guards so re-runs take a minute, not twenty.
+
+### Sync by audio cross-correlation
+
+Find each clip's offset against the master by cross-correlating 16 kHz mono WAVs (scipy `fftconvolve`, normalized by local energy; run via `uv run --python cpython-3.12-macos-aarch64-none` with numpy+scipy). Key points:
+
+- **Broadcast clips need one offset per soundbite** — the station edits between bites, so a single offset is wrong. A continuous clip needs one offset; confirm by correlating probe windows from the start, middle, and end (identical lag = no internal cuts).
+- NCC peaks of 0.25–0.45 are normal for different mics of the same event; verify each match against the transcripts rather than trusting the score.
+- Avoid `np.convolve` for the energy normalization (O(N·M), takes forever) — use `fftconvolve` throughout.
+
+### Know where the speaker is actually on camera
+
+TV stations cover soundbites with B-roll. Sample frames across every bite window and map the on-camera ranges; use the news **audio** for the whole bite but switch the **picture** to the master angle wherever the broadcast shows B-roll. Two traps from this project:
+
+- **Never montage frames with a shell glob** — `montage fox_*.jpg` sorts lexically (101, 103, ... 93, 95) and scrambles the grid. Build grids with explicit ffmpeg `hstack`/`vstack` inputs in known order.
+- **View comparison frames at ≥400 px wide.** A 320 px thumbnail caused a misread of which angle was on screen.
+
+### HDR phone video next to SDR broadcast
+
+iPhone HEVC is often HLG (`color_transfer=arib-std-b67`, bt2020 10-bit). Tonemap it once to SDR bt709 or it will look washed out against broadcast footage. Homebrew ffmpeg has no `zscale`; the old x86 build at `/usr/local/bin/ffmpeg` (4.3.1 tessus) does:
+
+```bash
+/usr/local/bin/ffmpeg -i hdr-input.mov \
+  -vf "fps=30,zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p" \
+  -c:v libx264 -crf 16 -preset fast -c:a pcm_s16le -ar 48000 -ac 2 sdr-mezzanine.mov
+```
+
+Conform everything to one canvas (1920×1080, 30 fps, yuv420p, setsar=1); 720p broadcast upscales fine with `scale=1920:1080:flags=lanczos`, and 29.97-vs-30 fps drift is under a frame for short bites.
+
+### Vertical phone clips as cutaway angles
+
+Crop to 16:9 rather than pillarboxing for brief cutaways: `crop=718:404:1:Y` on a 720×1280 source. Test the Y offset at several timestamps — handheld shooters zoom and drift, so a window that's fine at one point may clip the speaker's head later. Trim cutaways before any visible camera move.
+
+**AI upscaling:** `brew install fx-upscale` (Apple MetalFX, video-in/video-out, seconds to run) visibly beats lanczos for 2-3× upscales of cropped phone video — better-defined faces and hair, no plastic artifacts. Render the mezzanine at native cropped size, then:
+```bash
+fx-upscale crowd-lowres.mp4 --width 1920 --height 1080 --codec h264
+# writes "crowd-lowres Upscaled.mp4"
+```
+
+### Audio: loudness matching + equal-power crossfades
+
+Hard audio cuts between an ambient phone mic and broadcast podium mics are jarring even when loudness-matched. What works:
+
+1. **Measure each source's speech region** with `ffmpeg -af ebur128` and apply a static `volume=` gain per source toward a common target (−16 LUFS). Static gain preserves dynamics; per-segment `loudnorm` pumps.
+2. **Clean the ambient track** toward broadcast tone: `highpass=f=80,afftdn=nr=10:nf=-30`.
+3. **Build the audio as one mix, separate from the video cuts**: each region is `atrim` → gain chain → `afade` in/out (`curve=qsin`, 0.3 s) → `adelay` to its timeline position, then `amix=normalize=0`. Because every seam has the same live audio on both sides, extend the continuous master ±0.3 s into each news region and crossfade — the ambience hands off instead of jumping. News bites keep their exact bounds (a pre-roll handle would catch the reporter's voice-over).
+4. **`alimiter` gotcha:** it silently re-normalizes output to full scale unless you pass `level=false`. Use `alimiter=limit=0.85:attack=2:release=100:level=false` after the mix and verify with `ebur128=peak=true` (target true peak ≤ −1 dBTP; AAC overshoots the sample ceiling).
+
+### Script gotchas
+
+- `ffmpeg` inside a `while read` loop eats the rest of the piped table — always pass `-nostdin`.
+- A piped `while` loop runs in a subshell and discards variables; feed loops that accumulate state with a heredoc (`done <<EOF ... EOF`).
+- `ffmpeg -i file` with no output exits non-zero; under `set -o pipefail` an info-print like `ffmpeg -i out.mp4 | grep Duration` fails the script — append `|| true`.
+
+### Verification (do this every render)
+
+1. **Re-transcribe the finished file** with Whisper and read the transcript straight through: a correct edit reads as one continuous speech with no repeated or missing words at any audio switch. This catches wrong-offset splices immediately (a sign error once spliced in the reporter instead of the speaker — the transcript exposed it in seconds).
+2. **Frame-grab both sides of every video cut** (explicit-order grids, ≥400 px) to confirm the intended angle on each side.
+3. Check `ebur128` integrated loudness and true peak on the final.
