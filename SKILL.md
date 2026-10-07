@@ -305,6 +305,8 @@ ffmpeg -y -ss [START] -to [END] \
 
 Use `run_in_background: true` and wait for all tasks before reporting results.
 
+If the source is handheld and visibly shaky, stabilize the extracted clip before cropping vertical or burning captions — see *Video stabilization (crop-based)*.
+
 ### Step 5 — Generate VTT subtitles for a clip (optional)
 
 If the user wants a subtitle file for a clip, use this Python snippet to filter and re-zero the timestamps:
@@ -381,6 +383,7 @@ ffmpeg filter: crop=crop_width:source_height:x_offset:0
 - For combined segments (multiple clips in one), use a single `-ss` / `-to` range covering all clips
 - Always confirm output file paths with the user before starting if there are many clips
 - Offer to generate a VTT subtitle file for any clip that is longer than ~30 seconds
+- Stabilization is crop-based and costs resolution — stabilize full frame first, then compute the 9:16 crop from the stabilized file
 
 ---
 
@@ -400,6 +403,93 @@ ffmpeg -i /path/to/input.mp4 \
 - Run this on the source file first, then use the cleaned file for clip extraction
 
 A 60Hz electrical hum notch filter is less effective for streaming captures; `afftdn` works better in practice for live stream audio.
+
+---
+
+## Video stabilization (crop-based)
+
+Handheld footage — phone B-roll, a camera on a crowded riser — reads as shaky once it is cut into a short clip. Every option here is crop-based: the frame is shifted and rotated to cancel the motion, and the empty edges that exposes are hidden by zooming in. **Stabilization always costs resolution**, so budget for it before cropping to 9:16.
+
+**Check the build first.** Both stabilizers are optional ffmpeg components:
+
+```bash
+ffmpeg -hide_banner -filters | grep -E 'vidstab|deshake'
+```
+
+Expect `vidstabdetect`, `vidstabtransform` (from `--enable-libvidstab`) and `deshake` (built in). The Homebrew build on this machine is already known to be missing pieces — no `libass`, no `zscale` — so do not assume `libvidstab` is there. If the check comes back with `deshake` only, run the same check against the x86 build at `/usr/local/bin/ffmpeg` (the 4.3.1 tessus build used for the HDR tonemap, which carries components Homebrew's is missing), reinstall with a full `brew install ffmpeg`, or fall back to `deshake` below.
+
+### Where this fits in the pipeline
+
+Stabilize **after trimming, before cropping, before captions**:
+
+1. Extract the clip with `-c copy` (Step 4)
+2. Stabilize the extracted clip, full frame
+3. Crop to 9:16 only if vertical was requested
+4. Burn captions last — an overlay must not be zoomed or shifted along with the picture
+
+Stabilizing the trimmed clip instead of the whole source keeps the two-pass analysis fast and keeps the smoothing window on motion that is actually in the clip.
+
+### ffmpeg + vidstab (recommended, two-pass)
+
+Pass 1 analyzes the motion and writes a transform file; pass 2 applies it.
+
+```bash
+# Pass 1 — detect. Produces no video, only the .trf transform data.
+ffmpeg -y -i /path/to/clip.mp4 \
+  -vf "vidstabdetect=shakiness=5:accuracy=15:result=/tmp/transforms.trf" \
+  -f null -
+
+# Pass 2 — transform
+ffmpeg -y -i /path/to/clip.mp4 \
+  -vf "vidstabtransform=input=/tmp/transforms.trf:smoothing=30:crop=black:optzoom=1,unsharp=5:5:0.8:3:3:0.4" \
+  -map_chapters -1 \
+  -c:v libx264 -preset fast -crf 23 \
+  -pix_fmt yuv420p -movflags +faststart \
+  -c:a copy \
+  /path/to/clip_stab.mp4
+```
+
+Both passes must see the **same input over the same range** — the `.trf` file is indexed per frame, so adding `-ss` or `-to` to only one pass misaligns every transform. Always set `result=` / `input=` explicitly: the default is `transforms.trf` in the working directory, which silently collides when stabilizing several clips in a row.
+
+- `smoothing=30` — frames of lowpass filtering on each side of the current frame, so ~±1s at 30fps. Higher is steadier but crops more and lags fast pans. The default is 10; 10–30 covers most speech footage.
+- `crop=black` fills the exposed edges with black. The default `crop=keep` smears border pixels from earlier frames instead, which looks worse than the black it replaces.
+- `optzoom=1` (the default) picks a single static zoom that keeps those edges out of frame for the whole clip. Use `optzoom=0` with `zoom=N` to set the percentage by hand, or `optzoom=2` plus `zoomspeed=0.25` for per-frame adaptive zoom — adaptive can breathe visibly, so prefer static.
+- `shakiness=1–10` — raise it for rougher footage. `accuracy=15` is already the maximum.
+- `unsharp=...` is optional, and counteracts the softening from the resample. Drop it if the footage is already crisp.
+- `-c:a copy` — these filters only touch video, so never re-encode the audio.
+
+**Locked-off shot with slow drift** (tripod creep rather than shake): add `tripod=1` to *both* passes. Frames are then stabilized against the first frame instead of a moving average, which removes the drift outright instead of smoothing it.
+
+**10-bit or HDR source:** vidstab accepts only 8-bit planar YUV. Tonemap to SDR first (see *HDR phone video next to SDR broadcast*) and stabilize the SDR mezzanine — letting ffmpeg auto-insert the pixel-format conversion skips tonemapping and washes the picture out.
+
+### ffmpeg deshake (fallback, single-pass, weaker)
+
+For a build without libvidstab, or a quick look before committing to two passes:
+
+```bash
+ffmpeg -y -i /path/to/clip.mp4 \
+  -vf deshake \
+  -map_chapters -1 \
+  -c:v libx264 -preset fast -crf 23 \
+  -pix_fmt yuv420p -movflags +faststart \
+  -c:a copy \
+  /path/to/clip_stab.mp4
+```
+
+`deshake` matches each frame against the one before it with no look-ahead, so it cannot smooth a trajectory the way vidstab does. Expect residual jitter and occasional edge artifacts. Good enough for a two-second cutaway; not for a sustained shot.
+
+### gyroflow (best results, when the footage has gyro data)
+
+If the clip came off a drone, an action cam, or a recent phone that logs gyroscope metadata, `gyroflow` beats vidstab outright: it stabilizes from the recorded camera motion rather than inferring it from pixels, and it corrects rolling-shutter wobble that vidstab cannot see. It also has an optical-flow path for footage with no gyro log. It ships a CLI with adjustable smoothness and crop/zoom — check `gyroflow --help` on the installed version rather than copying flags, since they shift between releases.
+
+Worth the extra tool only for noticeably rough handheld footage that has to hold on screen. For brief cutaways, vidstab is enough.
+
+### Verify every stabilized clip
+
+- Duration unchanged against the source: `ffprobe -v error -show_entries format=duration -of csv=p=0 clip_stab.mp4`
+- Audio still in sync — a dropped `-c:a copy` with a re-encode is the usual cause
+- No black edges at the extremes of motion; raise `smoothing` or zoom further if any show
+- Enough resolution left for a 9:16 crop after `optzoom` ate into the frame — re-check the crop offsets against the stabilized file, not the original
 
 ---
 

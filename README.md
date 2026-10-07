@@ -24,6 +24,7 @@ Each clip was produced in horizontal and vertical formats. A matching `.vtt` sub
 ## Requirements
 
 - `ffmpeg` — video extraction and encoding
+- `ffmpeg` built with `--enable-libvidstab` — optional, only for stabilizing shaky footage
 - A VTT subtitle file from the source video (Vimeo auto-generated captions work well)
 - Python 3 — for VTT timestamp adjustment script
 
@@ -71,6 +72,27 @@ python3 adjust_vtt.py \
   --end 137 \
   --output clip_subtitles.vtt
 ```
+
+### 4. Stabilize shaky footage (optional)
+
+Handheld sources can be stabilized with ffmpeg's two-pass vidstab filters. This is crop-based — the frame is shifted to cancel the motion and zoomed in to hide the exposed edges — so run it on the full frame *before* taking the 9:16 crop, and recompute the crop offsets from the stabilized file.
+
+```bash
+# Pass 1 — analyze motion
+ffmpeg -i clip.mp4 \
+  -vf "vidstabdetect=shakiness=5:accuracy=15:result=/tmp/transforms.trf" \
+  -f null -
+
+# Pass 2 — apply it
+ffmpeg -y -i clip.mp4 \
+  -vf "vidstabtransform=input=/tmp/transforms.trf:smoothing=30:crop=black:optzoom=1" \
+  -c:v libx264 -preset fast -crf 23 \
+  -pix_fmt yuv420p -movflags +faststart \
+  -c:a copy \
+  clip_stabilized.mp4
+```
+
+Both passes must read the same input over the same range — the transform file is indexed per frame. `smoothing` trades steadiness against how much gets cropped away. Check the filters exist first with `ffmpeg -hide_banner -filters | grep vidstab`; if the build lacks libvidstab, `-vf deshake` is a weaker single-pass fallback. For footage with gyroscope metadata (drones, action cams), `gyroflow` gives better results than either.
 
 ## Vertical Crop Math
 
