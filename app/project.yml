@@ -1,0 +1,31 @@
+# xcodegen spec for the Speech Clip Extractor macOS app.
+# Regenerate the Xcode project after editing: cd app && xcodegen generate
+name: SpeechClipExtractor
+options:
+  bundleIdPrefix: app
+  deploymentTarget:
+    macOS: "15.0"
+targets:
+  SpeechClipExtractor:
+    type: application
+    platform: macOS
+    sources: [SpeechClipExtractor]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.speechclipextractor
+        PRODUCT_NAME: Speech Clip Extractor
+        # App icon: SpeechClipExtractor/Assets.xcassets/AppIcon (drawn by icon-source.swift).
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_VERSION: "5.0"
+        # Signed to run locally only; not for distribution.
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        # No sandbox and no hardened runtime: the app runs Homebrew tools
+        # (ffmpeg, yt-dlp, mlx_whisper, python) and yt-dlp reads Safari cookies.
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_HARDENED_RUNTIME: NO
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Speech Clip Extractor
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.video
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"

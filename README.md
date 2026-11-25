@@ -81,3 +81,29 @@ crop_width  = source_height × (9/16)
 x_offset    = (source_width − crop_width) / 2
 crop filter = crop=crop_width:source_height:x_offset:0
 ```
+
+## macOS app
+
+`app/` is a SwiftUI version of this workflow: open or download a video, transcribe it (with optional speaker labels), pick clips by hand or with Claude, and export horizontal, vertical, VTT and captioned versions. It runs the same tools as the skill (ffmpeg, yt-dlp, mlx_whisper, pyannote).
+
+Build it:
+
+```bash
+cd app
+xcodegen generate
+xcodebuild -project SpeechClipExtractor.xcodeproj -scheme SpeechClipExtractor -configuration Release -derivedDataPath build build
+open "build/Build/Products/Release/Speech Clip Extractor.app"
+```
+
+Add your Anthropic API key in Settings (⌘,) to use Suggest Highlights. Clip lists save next to the video as `<name>.clips.json`.
+
+### Sharing the app
+
+The app isn't signed with an Apple Developer ID yet, so macOS blocks it on other Macs at first:
+
+1. Zip the built app (right-click it in Finder > Compress) and send the zip.
+2. The recipient unzips it, moves it to Applications and opens it. When macOS says it can't check the app, they go to System Settings > Privacy & Security, scroll down and click **Open Anyway**. This is needed once.
+3. They install the tools it uses. The app's **Check Setup…** window (app menu) lists anything missing with the Homebrew command to install it. Transcribing needs an Apple Silicon Mac.
+4. For Suggest Highlights they add their own Anthropic, OpenRouter or DeepInfra API key in Settings. Keys are stored in their Keychain only.
+
+Signing with a Developer ID and notarizing (Apple Developer Program, $99/year) removes step 2. The app can't go in the Mac App Store: App Review Guideline 5.2.3 bars downloading from YouTube and similar sites, and the App Store sandbox would block the Homebrew tools.
