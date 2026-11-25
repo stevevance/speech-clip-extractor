@@ -57,18 +57,56 @@ struct ProjectWindow: View {
     let delegate: AppDelegate
     @StateObject private var app = AppState()
     @Environment(\.undoManager) private var undoManager
+    @State private var spaceBarMonitor: Any?
 
     var body: some View {
         ContentView()
             .environmentObject(app)
             .focusedSceneObject(app)
             .frame(minWidth: 1000, minHeight: 660)
+            .background(WindowAccessor { window in app.window = window })
             .onAppear {
                 let state = app
                 delegate.attach { [weak state] urls in state?.handleDrop(urls) }
                 app.undoManager = undoManager
+                spaceBarMonitor = Self.watchSpaceBar(for: state)
+            }
+            .onDisappear {
+                if let spaceBarMonitor { NSEvent.removeMonitor(spaceBarMonitor) }
+                spaceBarMonitor = nil
             }
             .onChange(of: undoManager) { _, manager in app.undoManager = manager }
+    }
+
+    /*
+     * The space bar plays and pauses this window's video, like QuickTime. It
+     * still types a space while a text field (a clip title or time, the
+     * transcript search) is being edited, and does nothing in sheets or other
+     * windows, or when no video is open.
+     */
+    private static func watchSpaceBar(for state: AppState) -> Any? {
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak state] event in
+            MainActor.assumeIsolated {
+                guard let state, state.player != nil,
+                      event.keyCode == 49, // space
+                      event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty,
+                      let window = state.window, event.window === window,
+                      !(window.firstResponder is NSText) else { return event }
+                state.togglePlayback()
+                return nil
+            }
+        }
+    }
+}
+
+// Reports the NSWindow a SwiftUI view is in, once it's been placed in one.
+struct WindowAccessor: NSViewRepresentable {
+    let onWindow: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView { NSView() }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async { onWindow(view.window) }
     }
 }
 

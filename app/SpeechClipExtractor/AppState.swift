@@ -68,6 +68,8 @@ final class AppState: ObservableObject {
     @Published var clipSelection: Set<Clip.ID> = []
     // This window's undo manager, for undoing clip changes with ⌘Z.
     weak var undoManager: UndoManager?
+    // This project's window, so the space bar only controls the video in the window in front.
+    weak var window: NSWindow?
 
     private var job: Task<Void, Never>?
     // True while the status line shows a tool's progress bar rather than a step message.
@@ -326,6 +328,16 @@ final class AppState: ObservableObject {
     }
 
     // MARK: - Playback
+
+    // Play if paused, pause if playing (the space bar).
+    func togglePlayback() {
+        guard let player else { return }
+        if player.timeControlStatus == .paused {
+            player.play()
+        } else {
+            player.pause()
+        }
+    }
 
     func seek(to seconds: Double, play: Bool = false) {
         guard let player else { return }
