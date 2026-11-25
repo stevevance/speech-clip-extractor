@@ -11,9 +11,36 @@ It comes two ways: a **Mac app** you can download, and a **Claude Code skill** (
 The app does the whole workflow in one window:
 
 - Open a video, drop one on the window, or download one from a URL (YouTube, Vimeo, news sites and more, via yt-dlp)
-- Transcribe it with Whisper on your Mac, optionally with speaker labels
+- Transcribe it with Whisper on your Mac, optionally with speaker labels (diarization, explained below)
 - Pick clips by selecting transcript lines, or have AI suggest highlights (Anthropic, OpenRouter or DeepInfra, with your own API key)
 - Export horizontal and vertical clips, a subtitle file for each clip, and versions with burned-in captions
+
+### What you'll need
+
+- **A Mac with macOS 15 or later.** Transcribing needs an Apple Silicon (M-series) Mac.
+- **Free command-line tools** (ffmpeg, yt-dlp, mlx-whisper). The app's Check Setup window lists them and gives the install command for each.
+- **An AI API key, only for Suggest Highlights.** Get one from [Anthropic](https://console.anthropic.com/settings/keys) to use Claude, or use [OpenRouter](https://openrouter.ai/settings/keys) or [DeepInfra](https://deepinfra.com/dash/api_keys) instead. These services charge per use. You don't need a key to pick clips yourself from the transcript.
+- **A free Hugging Face token, only for speaker labels.** See below.
+
+### Speaker labels (diarization)
+
+*Diarization* means working out **who spoke when**. Whisper turns speech into text but can't tell voices apart. With diarization turned on, the app also runs [pyannote](https://github.com/pyannote/pyannote-audio), which listens for changes in voice and labels each line of the transcript with a speaker, such as `[SPEAKER_00]` or `[SPEAKER_01]`. That helps with hearings, panels, interviews and anything else with more than one person talking, so you can tell whose quote you're clipping. For a single speaker, leave it off.
+
+The labels are numbered, not named: compare them with the video to see who each one is. Two similar voices on the same microphone can end up sharing a label, so check before attributing a quote.
+
+pyannote's models are free but gated: Hugging Face asks you to accept their terms first. To set it up once:
+
+1. Make a free account at [huggingface.co](https://huggingface.co/join).
+2. Accept the terms on both model pages: [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1) and [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0).
+3. Create an access token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) (the "Read" type is enough).
+4. Save it on your Mac by running this in Terminal and pasting the token when asked (it uses [uv](https://docs.astral.sh/uv/); install that first with `brew install uv` if needed):
+
+   ```bash
+   uvx --from huggingface_hub hf auth login
+   ```
+
+   The token is saved in `~/.cache/huggingface/token`, where the app finds it. Never share it or commit it to a repository.
+5. Install pyannote with the command the app's **Check Setup…** window gives you.
 
 ### Installing it
 
@@ -27,7 +54,8 @@ The app does the whole workflow in one window:
    xattr -dr com.apple.quarantine "/Applications/Speech Clip Extractor.app"
    ```
 4. Choose **Check Setup…** from the app menu. It lists the free tools the app uses (ffmpeg, yt-dlp, mlx-whisper and more) and gives the Homebrew command to install anything missing. Transcribing needs an Apple Silicon Mac.
-5. To use Suggest Highlights, add your API key in **Settings** (⌘,). Keys are stored only in your Mac's Keychain.
+5. To use Suggest Highlights, choose your AI provider in **Settings** (⌘,) and paste its API key. Keys are stored only in your Mac's Keychain.
+6. For speaker labels, set up a Hugging Face token as described in [Speaker labels (diarization)](#speaker-labels-diarization).
 
 ## What the skill does
 
@@ -121,8 +149,6 @@ open "build/Build/Products/Release/Speech Clip Extractor.app"
 ```
 
 To share a build, zip it with `ditto -c -k --keepParent "Speech Clip Extractor.app" Speech-Clip-Extractor.zip` and attach it to a GitHub release. Clip lists save next to each video as `<name>.clips.json`.
-
-Signing with a Developer ID and notarizing (Apple Developer Program, $99/year) would remove the "Not Opened" step above. The app can't go in the Mac App Store: App Review Guideline 5.2.3 bars downloading from YouTube and similar sites, and the App Store sandbox would block the Homebrew tools.
 
 ## Testing the Mac app
 
