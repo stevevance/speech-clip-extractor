@@ -20,10 +20,14 @@ targets:
         # Signed to run locally only; not for distribution.
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_STYLE: Manual
-        # No sandbox and no hardened runtime: the app runs Homebrew tools
-        # (ffmpeg, yt-dlp, mlx_whisper, python) and yt-dlp reads Safari cookies.
+        # No sandbox: the app runs Homebrew tools (ffmpeg, yt-dlp, mlx_whisper,
+        # python) and yt-dlp reads Safari cookies.
         ENABLE_APP_SANDBOX: NO
-        ENABLE_HARDENED_RUNTIME: NO
+        # Hardened runtime: blocks code injection (DYLD_INSERT_LIBRARIES) and
+        # debugger access, so other software can't run inside the app to get
+        # its Keychain items. Notarization requires it too. The tools the app
+        # launches are separate programs and aren't affected.
+        ENABLE_HARDENED_RUNTIME: YES
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Speech Clip Extractor
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.video

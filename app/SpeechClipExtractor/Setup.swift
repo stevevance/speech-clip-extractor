@@ -75,7 +75,7 @@ struct SetupItem: Identifiable {
     // Shown when missing: a Terminal command to copy, and/or a note or link.
     var command: String? = nil
     var note: String? = nil
-    var link: URL? = nil
+    var links: [URL] = []
     // Missing an essential item opens the setup window at launch.
     var essential = false
 }
@@ -102,7 +102,7 @@ enum SetupCheck {
             name: "Homebrew", neededFor: "Installing the tools below",
             ok: brew != nil,
             note: "Install Homebrew from brew.sh, then come back and check again.",
-            link: URL(string: "https://brew.sh"), essential: true
+            links: [URL(string: "https://brew.sh")!], essential: true
         ))
         items.append(SetupItem(
             name: "ffmpeg", neededFor: "Cutting, cropping, captioning and denoising clips",
@@ -127,11 +127,13 @@ enum SetupCheck {
                 command: "brew install python@3.11 && /opt/homebrew/bin/pip3.11 install mlx-whisper pyannote.audio --break-system-packages"
             ))
             items.append(SetupItem(
-                name: "HuggingFace token", neededFor: "Speaker labels when transcribing",
+                name: "Hugging Face token", neededFor: "Speaker labels when transcribing",
                 ok: FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.cache/huggingface/token"),
-                command: "uvx hf auth login",
-                note: "Make a free HuggingFace account and an access token, accept the terms on the pyannote/speaker-diarization-3.1 model page, then run the command and paste the token.",
-                link: URL(string: "https://huggingface.co/pyannote/speaker-diarization-3.1")
+                command: "uvx --from huggingface_hub hf auth login",
+                note: "Make a free Hugging Face account, accept the terms on both pyannote model pages below (speaker-diarization-3.1 needs segmentation-3.0 to run), create a Read access token, then run the command and paste the token.",
+                links: [URL(string: "https://huggingface.co/pyannote/speaker-diarization-3.1")!,
+                        URL(string: "https://huggingface.co/pyannote/segmentation-3.0")!,
+                        URL(string: "https://huggingface.co/settings/tokens")!]
             ))
         }
         // The key for whichever AI provider is chosen in Settings.
@@ -140,7 +142,7 @@ enum SetupCheck {
             name: "\(provider.name) API key", neededFor: "Suggest Highlights",
             ok: Keychain.exists(provider.keychainAccount),
             note: "Get a key from \(provider.name), then paste it in Settings (⌘,). You can switch to Anthropic, OpenRouter or DeepInfra there.",
-            link: provider.keyPage
+            links: [provider.keyPage]
         ))
         return items
     }
@@ -241,8 +243,9 @@ struct SetupRow: View {
                             }
                         }
                     }
-                    if let link = item.link {
-                        Link(link.host ?? link.absoluteString, destination: link).font(.caption)
+                    // Show the page path too, so two links on one site can be told apart.
+                    ForEach(item.links, id: \.self) { link in
+                        Link(link.host.map { $0 + link.path } ?? link.absoluteString, destination: link).font(.caption)
                     }
                 }
             }

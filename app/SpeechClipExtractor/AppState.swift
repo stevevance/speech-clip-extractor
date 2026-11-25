@@ -62,12 +62,20 @@ final class AppState: ObservableObject {
     // A finished-step message shown in a green bar at the top of the window.
     @Published var notice: String?
     @Published var showSetup = false
-    // The sheet open on this window (download, transcribe, suggest, denoise).
+    // The sheet open on this window (download, transcribe, suggest).
     @Published var sheet: SheetKind?
     // Clips selected in the clip list (for Delete, Duplicate, Preview and the right-click menu).
     @Published var clipSelection: Set<Clip.ID> = []
-    // This window's undo manager, for undoing clip changes with ⌘Z.
-    weak var undoManager: UndoManager?
+    /*
+     * The undo manager for clip changes: the window's own, which is the one
+     * the Edit menu's Undo and ⌘Z use. SwiftUI's environment undo manager is
+     * only a fallback, because it can still be nil when the window appears,
+     * which left Undo greyed out (found by the automated UI test).
+     */
+    weak var environmentUndoManager: UndoManager?
+    var undoManager: UndoManager? { window?.undoManager ?? environmentUndoManager }
+    // This project's window, so the space bar only controls the video in the window in front.
+    weak var window: NSWindow?
 
     private var job: Task<Void, Never>?
     // True while the status line shows a tool's progress bar rather than a step message.
@@ -126,8 +134,10 @@ final class AppState: ObservableObject {
         // A private run (downloads) never shows the URL or video ID in the log, the status line or an error.
         let clean: (String) -> String = { isPrivate ? AppState.redact($0) : $0 }
         appendLog(clean("$ \(name) " + args.map(shellQuote).joined(separator: " ")))
-        let (status, output) = try await ProcessRunner.run(executable, args, cwd: cwd) { line, isProgress in
+        let (status, output) = try await ProcessRunner.run(executable, args, cwd: cwd) { line, endedInReturn in
             let shown = clean(line)
+            // A redraw (ends in "\r") or anything shaped like a progress update goes to the status line, not the log.
+            let isProgress = endedInReturn || AppState.looksLikeProgress(line)
             // Hop to the main thread in order (DispatchQueue.main is FIFO).
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -160,6 +170,16 @@ final class AppState: ObservableObject {
             .replacingOccurrences(of: #"(\[[^\]]+\] )[^\s:]+:"#, with: "$1…:", options: .regularExpression)
     }
 
+    /*
+     * yt-dlp's "[download]  12.3% of 40MiB at …" and ffmpeg's "frame= … time= …"
+     * lines are progress updates even when they end in a newline, and would
+     * otherwise fill the log with thousands of lines.
+     */
+    nonisolated static func looksLikeProgress(_ line: String) -> Bool {
+        line.range(of: #"^\[download\]\s+[0-9.]+%"#, options: .regularExpression) != nil
+            || line.range(of: #"^frame=\s*\d+.*time="#, options: .regularExpression) != nil
+    }
+
     private func shellQuote(_ s: String) -> String {
         s.rangeOfCharacter(from: CharacterSet(charactersIn: " '\"$&()[];*?")) == nil ? s : "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
@@ -189,14 +209,22 @@ final class AppState: ObservableObject {
     /*
      * Opens a video (or audio file). A VTT with the same base name next to
      * it is loaded as the transcript, and a saved clip list is restored.
-     * keepWork carries the current transcript and clips over, for when the
-     * source is swapped for its denoised copy.
      */
-    func openVideo(_ url: URL, keepWork: Bool = false) {
-        if let timeObserver, let player { player.removeTimeObserver(timeObserver) }
-        player?.pause()
+    func openVideo(_ url: URL) {
+        /*
+         * Both observers belong to the old player and must come off it before
+         * it's replaced: removing one from a different player later throws an
+         * exception and crashes the app (a preview still running when another
+         * video opens).
+         */
+        if let player {
+            if let timeObserver { player.removeTimeObserver(timeObserver) }
+            if let previewObserver { player.removeTimeObserver(previewObserver) }
+            player.pause()
+        }
+        timeObserver = nil
+        previewObserver = nil
 
-        let keptCues = cues, keptClips = clips, keptVTT = vttURL
         videoURL = url
         videoSize = nil
         duration = 0
@@ -216,27 +244,40 @@ final class AppState: ObservableObject {
         undoManager?.removeAllActions()
         clipSelection = []
         loadingClips = true
-        if keepWork {
-            cues = keptCues
-            vttURL = keptVTT
-            clips = keptClips
-        } else {
-            cues = []
-            vttURL = nil
-            clips = []
-            cueSelection = []
-            let sidecar = base.appendingPathExtension("vtt")
-            if FileManager.default.fileExists(atPath: sidecar.path) {
-                loadTranscript(sidecar)
-            }
-            loadClips()
+        cues = []
+        vttURL = nil
+        clips = []
+        cueSelection = []
+        if let transcript = newestTranscript(for: url) {
+            loadTranscript(transcript)
         }
+        loadClips()
         loadingClips = false
-        if keepWork { saveClips() }
 
         notice = nil
         appendLog("Opened \(url.path)")
         Task { await probe() }
+    }
+
+    /*
+     * The transcript to load with a video: the newest of "<name>.vtt" and any
+     * "<name>-whisper….vtt" the app made when "<name>.vtt" was already taken.
+     */
+    private func newestTranscript(for video: URL) -> URL? {
+        let folder = video.deletingLastPathComponent()
+        let name = video.deletingPathExtension().lastPathComponent
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let candidates = files.filter { file in
+            file.pathExtension.lowercased() == "vtt" && {
+                let stem = file.deletingPathExtension().lastPathComponent
+                return stem == name || stem.hasPrefix(name + "-whisper")
+            }()
+        }
+        func modified(_ file: URL) -> Date {
+            (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        }
+        return candidates.max { modified($0) < modified($1) }
     }
 
     func loadTranscript(_ url: URL) {
@@ -250,21 +291,33 @@ final class AppState: ObservableObject {
         }
     }
 
-    // Reads the video's width, height and duration with ffprobe.
+    /*
+     * Reads the video's displayed width and height and its duration with
+     * ffprobe. Phone video is often stored sideways with a rotation tag; ffmpeg
+     * turns it upright when encoding, so for a 90° or 270° rotation the stored
+     * width and height are swapped to match what ffmpeg (and the viewer) sees.
+     */
     func probe() async {
         guard let url = videoURL, let ffprobe = Tools.find("ffprobe") else { return }
         do {
+            // "V:0" (capital V) skips attached pictures, so an audio file's cover art isn't taken for video.
             let (status, output) = try await ProcessRunner.run(ffprobe, [
-                "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=width,height:format=duration",
+                "-v", "error", "-select_streams", "V:0",
+                "-show_entries", "stream=width,height:stream_side_data=rotation:stream_tags=rotate:format=duration",
                 "-of", "json", url.path,
             ]) { _, _ in }
             guard status == 0 else { return }
+            // A slower probe of a video that's since been replaced mustn't overwrite the new one's values.
+            guard videoURL == url else { return }
             let data = Data(output.lines.joined(separator: "\n").utf8)
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
             if let stream = (json["streams"] as? [[String: Any]])?.first,
                let w = stream["width"] as? Int, let h = stream["height"] as? Int {
-                videoSize = CGSize(width: w, height: h)
+                let sideRotation = (stream["side_data_list"] as? [[String: Any]])?
+                    .compactMap { ($0["rotation"] as? NSNumber)?.intValue }.first
+                let tagRotation = ((stream["tags"] as? [String: Any])?["rotate"] as? String).flatMap { Int($0) }
+                let quarterTurns = abs(sideRotation ?? tagRotation ?? 0) % 180 == 90
+                videoSize = quarterTurns ? CGSize(width: h, height: w) : CGSize(width: w, height: h)
             }
             if let format = json["format"] as? [String: Any],
                let d = format["duration"] as? String, let seconds = Double(d) {
@@ -277,15 +330,22 @@ final class AppState: ObservableObject {
         }
     }
 
+    /*
+     * Files dropped on the window or sent from Finder. Refused while a job
+     * runs, because the job would put its results (a transcript, suggested
+     * clips) into the newly opened video. Videos open first and subtitle files
+     * load after, so a subtitle file dropped with its video isn't cleared when
+     * the video opens.
+     */
     func handleDrop(_ urls: [URL]) {
-        for url in urls {
-            switch url.pathExtension.lowercased() {
-            case "vtt", "srt":
-                loadTranscript(url)
-            default:
-                openVideo(url)
-            }
+        guard !urls.isEmpty else { return }
+        if busy {
+            errorMessage = "Wait for the current job to finish, or cancel it, before opening another file."
+            return
         }
+        let isSubtitle: (URL) -> Bool = { ["vtt", "srt"].contains($0.pathExtension.lowercased()) }
+        for url in urls where !isSubtitle(url) { openVideo(url) }
+        for url in urls where isSubtitle(url) { loadTranscript(url) }
     }
 
     // MARK: - Open panels
@@ -314,6 +374,16 @@ final class AppState: ObservableObject {
     }
 
     // MARK: - Playback
+
+    // Play if paused, pause if playing (the space bar).
+    func togglePlayback() {
+        guard let player else { return }
+        if player.timeControlStatus == .paused {
+            player.play()
+        } else {
+            player.pause()
+        }
+    }
 
     func seek(to seconds: Double, play: Bool = false) {
         guard let player else { return }

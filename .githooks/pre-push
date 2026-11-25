@@ -1,0 +1,28 @@
+#!/bin/sh
+# Blocks a push when any commit being pushed contains a secret, as a second
+# net behind pre-commit (which `git commit --no-verify` skips). Git passes one
+# line per branch: <local ref> <local sha> <remote ref> <remote sha>.
+. "$(dirname "$0")/find-gitleaks.sh"
+
+zero=0000000000000000000000000000000000000000
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  # Deleting a remote branch pushes no commits.
+  [ "$local_sha" = "$zero" ] && continue
+  if [ "$remote_sha" = "$zero" ]; then
+    # New branch: check every commit that isn't on the remote yet.
+    range="$local_sha --not --remotes"
+  else
+    range="$remote_sha..$local_sha"
+  fi
+  if ! "$GITLEAKS" git --log-opts="$range" --redact --no-banner --verbose; then
+    status=1
+  fi
+done
+
+if [ "$status" -ne 0 ]; then
+  echo "" >&2
+  echo "Push blocked: gitleaks found what looks like a secret in the commits being pushed (listed above)." >&2
+  echo "Remove it from those commits (for the last commit: fix the file, then git commit --amend), then push again." >&2
+  exit 1
+fi

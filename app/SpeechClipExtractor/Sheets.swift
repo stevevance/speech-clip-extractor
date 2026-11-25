@@ -97,19 +97,60 @@ struct SuggestSheet: View {
     @EnvironmentObject var app: AppState
     @Environment(\.dismiss) private var dismiss
     @State private var guidance = ""
-    @State private var count = 8
+    @State private var count = 1
     @State private var replace = false
+
+    // Seconds of speech: from the first transcript line to the last.
+    private var speechSeconds: Double {
+        guard let first = app.cues.map(\.start).min(), let last = app.cues.map(\.end).max() else { return 0 }
+        return max(0, last - first)
+    }
+
+    /*
+     * About one clip per 30 seconds of speech, from 1 to 30. Asking a short
+     * transcript for many clips made a model return a blank placeholder clip.
+     */
+    private var suggestedCount: Int {
+        min(30, max(1, Int((speechSeconds / 30).rounded(.up))))
+    }
+
+    // "16-second", "4-minute" or "1-hour 20-minute", for the caption.
+    private var lengthDescription: String {
+        let total = Int(speechSeconds.rounded())
+        if total < 60 { return "\(total)-second" }
+        let minutes = Int((speechSeconds / 60).rounded())
+        if minutes < 60 { return "\(minutes)-minute" }
+        return "\(minutes / 60)-hour \(minutes % 60)-minute"
+    }
 
     var body: some View {
         Form {
             Text("Suggest highlights with AI").font(.headline)
             Text("Sends the whole transcript (\(app.cues.count) cues) to \(Provider.current.currentModel) on \(Provider.current.name). This uses your API key and costs money. Change the provider or model in Settings (⌘,).")
                 .font(.caption).foregroundStyle(.secondary)
-            Stepper("About \(count) clips", value: $count, in: 1...30)
+            // A number you can type, with arrows beside it; kept between 1 and 30.
+            LabeledContent("Up to") {
+                HStack(spacing: 6) {
+                    TextField("Clips", value: $count, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 56)
+                        .accessibilityLabel("Number of clips")
+                        .onChange(of: count) { _, newValue in
+                            let clamped = min(30, max(1, newValue))
+                            if clamped != newValue { count = clamped }
+                        }
+                    Stepper("Number of clips", value: $count, in: 1...30).labelsHidden()
+                    Text(count == 1 ? "clip" : "clips")
+                }
+            }
+            Text("Suggested for a \(lengthDescription) transcript. Type any number from 1 to 30. The AI may return fewer if it finds fewer good moments.")
+                .font(.caption).foregroundStyle(.secondary)
             TextField("Guidance (optional)", text: $guidance, prompt: Text("e.g. focus on housing; skip the thank-yous"), axis: .vertical)
                 .lineLimit(2...4)
             Toggle("Replace the current clips", isOn: $replace)
                 .disabled(app.clips.isEmpty)
+            SpendingLimitTip(provider: Provider.current)
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
@@ -122,38 +163,30 @@ struct SuggestSheet: View {
         }
         .padding(20)
         .frame(width: 500)
+        .onAppear { count = suggestedCount }
     }
 }
 
-// MARK: - Denoise
-
-struct DenoiseSheet: View {
-    @EnvironmentObject var app: AppState
-    @Environment(\.dismiss) private var dismiss
-    @State private var noiseFloor = -25.0
+// A short spending-limit tip with a link to the provider's page for it.
+struct SpendingLimitTip: View {
+    let provider: Provider
 
     var body: some View {
-        Form {
-            Text("Remove background noise").font(.headline)
-            Text("Runs ffmpeg's afftdn denoiser on the whole source and switches to the cleaned copy (\"…clean.mp4\"). Your transcript and clips carry over.")
-                .font(.caption).foregroundStyle(.secondary)
-            Slider(value: $noiseFloor, in: -40 ... -15, step: 1) {
-                Text("Noise floor: \(Int(noiseFloor)) dB")
+        VStack(alignment: .leading, spacing: 4) {
+            // Gray tip text that wraps instead of running off the window's edge.
+            Text(provider.spendingLimitTip)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            // The link keeps the accent color, with an arrow so it reads as a link.
+            Link(destination: provider.spendingLimitPage) {
+                Label("Set a limit with \(provider.name)", systemImage: "arrow.up.right.square")
             }
-            Text("Lower values remove more noise but can make speech sound watery. -25 is a good start.")
-                .font(.caption).foregroundStyle(.secondary)
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Remove Noise") {
-                    app.denoise(noiseFloor: Int(noiseFloor))
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
+            .help(provider.spendingLimitPage.absoluteString)
+            .onHover { inside in
+                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
             }
         }
-        .padding(20)
-        .frame(width: 480)
+        .font(.caption)
     }
 }
 
@@ -238,6 +271,8 @@ struct ProviderSettings: View {
     @State private var newKey = ""
     @State private var hasKey = false
     @State private var replacing = false
+    // Shown under the key after saving, when the key was also cleared from the clipboard.
+    @State private var clearedClipboard = false
     @State private var model = ""
     @State private var models: [ModelInfo] = []
     @State private var loading = false
@@ -247,7 +282,9 @@ struct ProviderSettings: View {
         Group {
             if hasKey && !replacing {
                 HStack {
-                    Label("\(provider.name) API key saved in your Keychain.", systemImage: "key.fill")
+                    Label(clearedClipboard
+                          ? "\(provider.name) API key saved in your Keychain, and cleared from the clipboard."
+                          : "\(provider.name) API key saved in your Keychain.", systemImage: "key.fill")
                     Spacer()
                     Button("Replace…") { replacing = true }
                     Button("Remove", role: .destructive) {
@@ -255,11 +292,23 @@ struct ProviderSettings: View {
                         hasKey = false
                     }
                 }
+                SpendingLimitTip(provider: provider)
             } else {
                 HStack {
                     SecureField("\(provider.name) API key", text: $newKey)
                     Button("Save") {
-                        Keychain.save(newKey.trimmingCharacters(in: .whitespacesAndNewlines), account: provider.keychainAccount)
+                        let key = newKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                        Keychain.save(key, account: provider.keychainAccount)
+                        /*
+                         * If the key was pasted, it's still on the clipboard. Clear the
+                         * clipboard only when it holds this exact key, so nothing else the
+                         * user copied is lost. (A clipboard-history app keeps its own copy.)
+                         */
+                        let pasteboard = NSPasteboard.general
+                        if pasteboard.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines) == key {
+                            pasteboard.clearContents()
+                            clearedClipboard = true
+                        }
                         // Drop the typed copy as soon as it's in the Keychain.
                         newKey = ""
                         hasKey = Keychain.exists(provider.keychainAccount)

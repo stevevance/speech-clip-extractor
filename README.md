@@ -14,7 +14,6 @@ The app does the whole workflow in one window:
 - Transcribe it with Whisper on your Mac, optionally with speaker labels (diarization, explained below)
 - Pick clips by selecting transcript lines, or have AI suggest highlights (Anthropic, OpenRouter or DeepInfra, with your own API key)
 - Export horizontal and vertical clips, a subtitle file for each clip, and versions with burned-in captions
-- Remove background noise from the recording
 
 ### What you'll need
 
@@ -80,7 +79,6 @@ Each clip was produced in horizontal and vertical formats. A matching `.vtt` sub
 ## Requirements
 
 - `ffmpeg` — video extraction and encoding
-- `ffmpeg` built with `--enable-libvidstab` — optional, only for stabilizing shaky footage
 - A VTT subtitle file from the source video (Vimeo auto-generated captions work well)
 - Python 3 — for VTT timestamp adjustment script
 
@@ -129,27 +127,6 @@ python3 adjust_vtt.py \
   --output clip_subtitles.vtt
 ```
 
-### 4. Stabilize shaky footage (optional)
-
-Handheld sources can be stabilized with ffmpeg's two-pass vidstab filters. This is crop-based — the frame is shifted to cancel the motion and zoomed in to hide the exposed edges — so run it on the full frame *before* taking the 9:16 crop, and recompute the crop offsets from the stabilized file.
-
-```bash
-# Pass 1 — analyze motion
-ffmpeg -i clip.mp4 \
-  -vf "vidstabdetect=shakiness=5:accuracy=15:result=/tmp/transforms.trf" \
-  -f null -
-
-# Pass 2 — apply it
-ffmpeg -y -i clip.mp4 \
-  -vf "vidstabtransform=input=/tmp/transforms.trf:smoothing=30:crop=black:optzoom=1" \
-  -c:v libx264 -preset fast -crf 23 \
-  -pix_fmt yuv420p -movflags +faststart \
-  -c:a copy \
-  clip_stabilized.mp4
-```
-
-Both passes must read the same input over the same range — the transform file is indexed per frame. `smoothing` trades steadiness against how much gets cropped away. Check the filters exist first with `ffmpeg -hide_banner -filters | grep vidstab`; if the build lacks libvidstab, `-vf deshake` is a weaker single-pass fallback. For footage with gyroscope metadata (drones, action cams), `gyroflow` gives better results than either.
-
 ## Vertical Crop Math
 
 For other source resolutions, calculate the crop as follows:
@@ -172,3 +149,24 @@ open "build/Build/Products/Release/Speech Clip Extractor.app"
 ```
 
 To share a build, zip it with `ditto -c -k --keepParent "Speech Clip Extractor.app" Speech-Clip-Extractor.zip` and attach it to a GitHub release. Clip lists save next to each video as `<name>.clips.json`.
+
+## Testing the Mac app
+
+`app/tests/ui-test.sh` is an end-to-end test: it builds a separate copy of the app in a temporary folder, makes a test video and transcript, and drives the app through macOS accessibility scripting (opening a file, the Clip menu, undo and redo, the space bar, export with vertical and burned-in captions), then checks the saved clip list and exported files.
+
+```bash
+bash app/tests/ui-test.sh
+```
+
+It needs Xcode, XcodeGen and ffmpeg, plus Accessibility permission for the app you run it from (System Settings > Privacy & Security > Accessibility). It doesn't touch a copy of the app you have open, makes no AI calls, and deletes its temporary folder when done.
+
+## Secret checks for contributors
+
+This repo has git hooks in `.githooks/` that use [gitleaks](https://github.com/gitleaks/gitleaks) to block a commit or push containing what looks like a secret (API keys, tokens, private keys). Turn them on once per clone:
+
+```bash
+brew install gitleaks
+git config core.hooksPath .githooks
+```
+
+The commit check scans the staged changes; the push check scans every commit being pushed, so it also catches anything committed with `--no-verify`. Found values are hidden in the output. For a false alarm, add the finding's fingerprint to `.gitleaksignore`.

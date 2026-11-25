@@ -61,6 +61,8 @@ enum ClaudeClient {
         let inputTokens: Int
         let outputTokens: Int
         let model: String
+        // The reply exactly as the AI sent it, for the log, so an odd result can be diagnosed.
+        let rawReply: String
     }
 
     static func suggestHighlights(
@@ -72,7 +74,7 @@ enum ClaudeClient {
         effort: String
     ) async throws -> Result {
         let prompt = userPrompt(cues: cues, guidance: guidance, count: count)
-        var body: [String: Any] = [
+        let body: [String: Any] = [
             "model": model,
             "max_tokens": 16000,
             "system": systemPrompt,
@@ -83,18 +85,35 @@ enum ClaudeClient {
             ],
         ]
 
-        // Haiku has no server-side fallback; the other current models do.
-        if model.contains("haiku") {
-            return try await send(body, apiKey: apiKey, beta: nil)
-        }
-        // If a safety classifier declines, let the API retry on a fallback model it picks.
-        body["fallbacks"] = "default"
-        do {
-            return try await send(body, apiKey: apiKey, beta: "server-side-fallback-2026-07-01")
-        } catch ToolError.message(let text) where text.localizedCaseInsensitiveContains("fallback") {
-            // An account without the fallback beta gets a 400 naming it; retry without fallbacks.
-            body.removeValue(forKey: "fallbacks")
-            return try await send(body, apiKey: apiKey, beta: nil)
+        /*
+         * Two optional settings that not every model or account accepts:
+         * - refusal fallbacks (if a safety classifier declines, the API retries
+         *   on a fallback model it picks); Haiku has none, and an account
+         *   without the beta gets a 400 naming it;
+         * - the effort level, which older models in the live list (e.g. Haiku
+         *   4.5) reject with a 400 naming it.
+         * Each is dropped and the request sent again when a 400 names it.
+         */
+        var useFallbacks = !model.contains("haiku")
+        var useEffort = true
+        while true {
+            var attempt = body
+            if useFallbacks { attempt["fallbacks"] = "default" }
+            if !useEffort, var config = attempt["output_config"] as? [String: Any] {
+                config.removeValue(forKey: "effort")
+                attempt["output_config"] = config
+            }
+            do {
+                return try await send(attempt, apiKey: apiKey, beta: useFallbacks ? "server-side-fallback-2026-07-01" : nil)
+            } catch ToolError.message(let text) where text.hasPrefix("Claude API error 400") {
+                if useFallbacks && text.localizedCaseInsensitiveContains("fallback") {
+                    useFallbacks = false
+                } else if useEffort && text.localizedCaseInsensitiveContains("effort") {
+                    useEffort = false
+                } else {
+                    throw ToolError.message(text)
+                }
+            }
         }
     }
 
@@ -109,7 +128,13 @@ enum ClaudeClient {
             return String(format: "[%.1f-%.1f] ", cue.start, cue.end) + who + cue.text
         }.joined(separator: "\n")
 
-        var prompt = "Suggest about \(count) highlight clips from this transcript.\n"
+        /*
+         * "Up to", not "about": asked for 8 clips from a 16-second transcript, a
+         * model returned an empty placeholder entry rather than fewer clips.
+         */
+        var prompt = "Suggest up to \(count) highlight clips from this transcript. "
+            + "If it has fewer worthwhile moments, return fewer; if none, return an empty list. "
+            + "Every clip must be a real passage from the transcript: never return placeholder or empty entries.\n"
         let trimmedGuidance = guidance.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedGuidance.isEmpty {
             prompt += "Guidance from the editor: \(trimmedGuidance)\n"
@@ -157,16 +182,28 @@ enum ClaudeClient {
         }
 
         struct Envelope: Decodable { let highlights: [HighlightSuggestion] }
-        let envelope = try JSONDecoder().decode(Envelope.self, from: Data(text.utf8))
+        let envelope: Envelope
+        do {
+            envelope = try JSONDecoder().decode(Envelope.self, from: Data(text.utf8))
+        } catch {
+            throw ToolError.message("Claude's reply didn't match the expected format. It began: \(replyExcerpt(text))")
+        }
 
         let usage = json["usage"] as? [String: Any]
         return Result(
             highlights: envelope.highlights,
             inputTokens: usage?["input_tokens"] as? Int ?? 0,
             outputTokens: usage?["output_tokens"] as? Int ?? 0,
-            model: json["model"] as? String ?? ""
+            model: json["model"] as? String ?? "",
+            rawReply: text
         )
     }
+}
+
+// The first 300 characters of an AI reply, for error messages when it can't be read.
+func replyExcerpt(_ reply: String) -> String {
+    let trimmed = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.count > 300 ? String(trimmed.prefix(300)) + "…" : trimmed
 }
 
 /*
@@ -177,6 +214,16 @@ enum ClaudeClient {
 enum Keychain {
     private static let service = "app.speechclipextractor"
 
+    /*
+     * Keys already read this launch, by account, so macOS asks for Keychain
+     * access at most once per provider per launch instead of on every model
+     * list and every Suggest Highlights. Memory only: never written anywhere,
+     * gone when the app quits. The hardened runtime blocks code injection and
+     * debuggers, so other software can't read it from the app's memory.
+     */
+    private static var cache: [String: String] = [:]
+    private static let cacheLock = NSLock()
+
     private static func query(_ account: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
@@ -185,14 +232,48 @@ enum Keychain {
         ]
     }
 
+    /*
+     * The item's label is what macOS quotes in its Keychain prompt ("…wants to
+     * use your confidential information stored in "<label>""), and its name in
+     * Keychain Access. Without one, macOS shows the bare service name.
+     */
+    static func label(for account: String) -> String {
+        let name = Provider.allCases.first { $0.keychainAccount == account }?.name ?? "AI"
+        return "Speech Clip Extractor: \(name) API key"
+    }
+
+    private static let itemDescription = "API key"
+
     static func read(_ account: String = Provider.anthropic.keychainAccount) -> String? {
+        cacheLock.lock()
+        let cached = cache[account]
+        cacheLock.unlock()
+        if let cached { return cached }
+
         var q = query(account)
         q[kSecReturnData as String] = true
+        q[kSecReturnAttributes as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
         guard SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+              let found = item as? [String: Any],
+              let data = found[kSecValueData as String] as? Data else { return nil }
+
+        // Keys saved before labels existed get one now, so later prompts name the key.
+        if found[kSecAttrLabel as String] as? String != label(for: account) {
+            let update: [String: Any] = [
+                kSecAttrLabel as String: label(for: account),
+                kSecAttrDescription as String: itemDescription,
+            ]
+            SecItemUpdate(query(account) as CFDictionary, update as CFDictionary)
+        }
+        let key = String(data: data, encoding: .utf8)
+        if let key {
+            cacheLock.lock()
+            cache[account] = key
+            cacheLock.unlock()
+        }
+        return key
     }
 
     // Whether a key is saved, without reading the key itself.
@@ -201,6 +282,9 @@ enum Keychain {
     }
 
     static func delete(_ account: String = Provider.anthropic.keychainAccount) {
+        cacheLock.lock()
+        cache[account] = nil
+        cacheLock.unlock()
         SecItemDelete(query(account) as CFDictionary)
     }
 
@@ -209,6 +293,13 @@ enum Keychain {
         guard !key.isEmpty else { return }
         var add = query(account)
         add[kSecValueData as String] = Data(key.utf8)
-        SecItemAdd(add as CFDictionary, nil)
+        add[kSecAttrLabel as String] = label(for: account)
+        add[kSecAttrDescription as String] = itemDescription
+        if SecItemAdd(add as CFDictionary, nil) == errSecSuccess {
+            // A just-saved key needs no Keychain prompt to use.
+            cacheLock.lock()
+            cache[account] = key
+            cacheLock.unlock()
+        }
     }
 }

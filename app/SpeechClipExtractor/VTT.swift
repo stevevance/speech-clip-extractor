@@ -63,6 +63,32 @@ enum VTT {
         }
     }
 
+    /*
+     * Moves a clip's edges onto cue boundaries so it starts and ends on whole
+     * sentences: the start goes to the start of the cue it falls in (or the
+     * next cue, if it falls in a gap), and the end goes to the end of the cue
+     * it falls in (or the previous cue, if it falls in a gap). A start before
+     * the first cue moves to the first cue, and an end after the last cue
+     * moves to the end of the last cue, so a clip never runs past the speech.
+     * If snapping would leave nothing, the original times are returned.
+     */
+    static func snap(_ cues: [Cue], start: Double, end: Double) -> (start: Double, end: Double) {
+        let sorted = cues.sorted { $0.start < $1.start }
+        var newStart = start
+        if let inside = sorted.first(where: { $0.start <= start && start < $0.end }) {
+            newStart = inside.start
+        } else if let next = sorted.first(where: { $0.start >= start }) {
+            newStart = next.start
+        }
+        var newEnd = end
+        if let inside = sorted.first(where: { $0.start < end && end <= $0.end }) {
+            newEnd = inside.end
+        } else if let previous = sorted.last(where: { $0.end <= end }) {
+            newEnd = previous.end
+        }
+        return newEnd > newStart ? (newStart, newEnd) : (start, end)
+    }
+
     // Writes cues as a numbered VTT file. keepSpeakers puts the "[SPEAKER_00]: " prefixes back.
     static func write(_ cues: [Cue], to url: URL, keepSpeakers: Bool) throws {
         var out = ["WEBVTT", ""]

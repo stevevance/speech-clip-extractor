@@ -118,6 +118,27 @@ final class LineBuffer: @unchecked Sendable {
 }
 
 enum ProcessRunner {
+    // Every process started by pid, its children's children and so on, found with pgrep.
+    static func descendants(of pid: Int32) -> [Int32] {
+        var found: [Int32] = []
+        var queue = [pid]
+        while let parent = queue.popLast() {
+            let pgrep = Process()
+            pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+            pgrep.arguments = ["-P", String(parent)]
+            let pipe = Pipe()
+            pgrep.standardOutput = pipe
+            pgrep.standardError = FileHandle.nullDevice
+            guard (try? pgrep.run()) != nil else { continue }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            pgrep.waitUntilExit()
+            let children = String(decoding: data, as: UTF8.self).split(separator: "\n").compactMap { Int32($0) }
+            found += children
+            queue += children
+        }
+        return found
+    }
+
     /*
      * Runs a tool and waits for it, streaming its output (stdout and stderr
      * merged) to onLine. Cancelling the Swift task terminates the process.
@@ -151,6 +172,25 @@ enum ProcessRunner {
             }
         }
 
+        /*
+         * Stops the tool and its own children first (yt-dlp's ffmpeg,
+         * mlx_whisper's decoder): they inherit the output pipe, and the job
+         * can't finish while any of them still holds it open.
+         */
+        let stop: @Sendable () -> Void = {
+            guard process.isRunning else { return }
+            for child in descendants(of: process.processIdentifier).reversed() {
+                kill(child, SIGTERM)
+            }
+            process.terminate()
+        }
+
+        // Cancelled before this tool even started (Cancel pressed between two steps): don't start it.
+        if Task.isCancelled {
+            reader.readabilityHandler = nil
+            throw CancellationError()
+        }
+
         let status: Int32 = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 process.terminationHandler = { finished in
@@ -162,6 +202,11 @@ enum ProcessRunner {
                 }
                 do {
                     try process.run()
+                    /*
+                     * A cancel that arrived while the tool was starting found
+                     * nothing running to stop, so check again now that it runs.
+                     */
+                    if Task.isCancelled { stop() }
                 } catch {
                     process.terminationHandler = nil
                     reader.readabilityHandler = nil
@@ -169,7 +214,7 @@ enum ProcessRunner {
                 }
             }
         } onCancel: {
-            if process.isRunning { process.terminate() }
+            stop()
         }
 
         if Task.isCancelled { throw CancellationError() }

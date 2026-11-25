@@ -4,10 +4,13 @@ import UserNotifications
 
 /*
  * Receives files sent from Finder (Open With, or dropped on the Dock icon)
- * and hands them to the most recently opened window, like a drop on it.
+ * and hands them to a window, like a drop on it: the window in front, or
+ * else any window still open. Windows are held weakly, so a closed one is
+ * never chosen; with none open, the files wait for the next window.
  */
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
-    var onOpen: (([URL]) -> Void)?
+    private struct OpenWindow { weak var state: AppState? }
+    private var windows: [OpenWindow] = []
     private var pending: [URL] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -20,13 +23,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        if let onOpen { onOpen(urls) } else { pending += urls }
+        MainActor.assumeIsolated {
+            windows.removeAll { $0.state == nil }
+            let target = windows.first { $0.state?.window?.isKeyWindow == true }?.state
+                ?? windows.last?.state
+            if let target { target.handleDrop(urls) } else { pending += urls }
+        }
     }
 
-    // Files that arrived before any window existed.
-    func attach(_ handler: @escaping ([URL]) -> Void) {
-        onOpen = handler
-        if !pending.isEmpty { handler(pending); pending = [] }
+    // A window opened: remember it, and give it any files that arrived while no window was open.
+    func register(_ state: AppState) {
+        MainActor.assumeIsolated {
+            windows.removeAll { $0.state == nil || $0.state === state }
+            windows.append(OpenWindow(state: state))
+            if !pending.isEmpty {
+                state.handleDrop(pending)
+                pending = []
+            }
+        }
     }
 }
 
@@ -57,18 +71,56 @@ struct ProjectWindow: View {
     let delegate: AppDelegate
     @StateObject private var app = AppState()
     @Environment(\.undoManager) private var undoManager
+    @State private var spaceBarMonitor: Any?
 
     var body: some View {
         ContentView()
             .environmentObject(app)
             .focusedSceneObject(app)
             .frame(minWidth: 1000, minHeight: 660)
+            .background(WindowAccessor { window in app.window = window })
             .onAppear {
                 let state = app
-                delegate.attach { [weak state] urls in state?.handleDrop(urls) }
-                app.undoManager = undoManager
+                delegate.register(state)
+                app.environmentUndoManager = undoManager
+                spaceBarMonitor = Self.watchSpaceBar(for: state)
             }
-            .onChange(of: undoManager) { _, manager in app.undoManager = manager }
+            .onDisappear {
+                if let spaceBarMonitor { NSEvent.removeMonitor(spaceBarMonitor) }
+                spaceBarMonitor = nil
+            }
+            .onChange(of: undoManager) { _, manager in app.environmentUndoManager = manager }
+    }
+
+    /*
+     * The space bar plays and pauses this window's video, like QuickTime. It
+     * still types a space while a text field (a clip title or time, the
+     * transcript search) is being edited, and does nothing in sheets or other
+     * windows, or when no video is open.
+     */
+    private static func watchSpaceBar(for state: AppState) -> Any? {
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak state] event in
+            MainActor.assumeIsolated {
+                guard let state, state.player != nil,
+                      event.keyCode == 49, // space
+                      event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty,
+                      let window = state.window, event.window === window,
+                      !(window.firstResponder is NSText) else { return event }
+                state.togglePlayback()
+                return nil
+            }
+        }
+    }
+}
+
+// Reports the NSWindow a SwiftUI view is in, once it's been placed in one.
+struct WindowAccessor: NSViewRepresentable {
+    let onWindow: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView { NSView() }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async { onWindow(view.window) }
     }
 }
 
@@ -104,9 +156,6 @@ struct ProjectCommands: Commands {
             Button("Suggest Highlights…") { app?.sheet = .suggest }
                 .keyboardShortcut("l", modifiers: [.command, .shift])
                 .disabled(app?.cues.isEmpty ?? true || app!.busy)
-            Button("Remove Noise…") { app?.sheet = .denoise }
-                .keyboardShortcut("n", modifiers: [.command, .option])
-                .disabled(app?.videoURL == nil || app!.busy)
             Divider()
             Button("Add Clip from Selection") { app?.addClipFromSelection() }
                 .keyboardShortcut("k")
@@ -145,7 +194,7 @@ struct ProjectCommands: Commands {
 // MARK: - Main window
 
 enum SheetKind: String, Identifiable {
-    case download, transcribe, suggest, denoise
+    case download, transcribe, suggest
     var id: String { rawValue }
 }
 
@@ -204,11 +253,6 @@ struct ContentView: View {
                     .help("Ask AI to pick quotable moments (⇧⌘L)")
                     .disabled(app.busy || app.cues.isEmpty)
             }
-            ToolbarItem(id: "denoise", placement: .automatic) {
-                Button { app.sheet = .denoise } label: { Label("Remove Noise", systemImage: "speaker.wave.2") }
-                    .help("Clean up buzzing or background noise with ffmpeg afftdn (⌥⌘N)")
-                    .disabled(app.busy || app.videoURL == nil)
-            }
             ToolbarItem(id: "export", placement: .automatic, showsByDefault: false) {
                 Button { app.exportClips() } label: { Label("Export Clips", systemImage: "square.and.arrow.up") }
                     .help("Export the ticked clips (⌘E)")
@@ -220,7 +264,6 @@ struct ContentView: View {
             case .download: DownloadSheet()
             case .transcribe: TranscribeSheet()
             case .suggest: SuggestSheet()
-            case .denoise: DenoiseSheet()
             }
         }
         .sheet(isPresented: $app.showSetup) { SetupView() }
@@ -529,6 +572,7 @@ struct ClipRow: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Toggle("Include in export", isOn: $clip.include).labelsHidden()
+                    .accessibilityLabel("Include in export")
                     .help("Include this clip when exporting")
                 TextField("Title", text: $clip.title).textFieldStyle(.roundedBorder)
                     .accessibilityLabel("Clip title")
@@ -574,11 +618,27 @@ struct ClipMenu: View {
     @EnvironmentObject var app: AppState
     let clip: Clip
 
+    // The selection when the clicked clip is part of it, otherwise just the clicked clip.
+    private var targets: [Clip] {
+        app.clipSelection.contains(clip.id) ? app.selectedClips : [clip]
+    }
+
     var body: some View {
         Button("Preview") { app.preview(clip) }
         Button("Set Start to Playhead") { app.setStart(of: clip, to: app.currentTime) }
         Button("Set End to Playhead") { app.setEnd(of: clip, to: app.currentTime) }
         Button("Jump to Start") { app.seek(to: clip.start) }
+        Divider()
+        Divider()
+        // Export just this clip (or the selection it's part of), with or without open captions.
+        Button(targets.count > 1 ? "Export \(targets.count) Selected Clips" : "Export Clip") {
+            app.exportClips(only: targets)
+        }
+        .disabled(app.busy)
+        Button(targets.count > 1 ? "Export \(targets.count) Selected Clips with Open Captions" : "Export Clip with Open Captions") {
+            app.exportClips(only: targets, openCaptions: true)
+        }
+        .disabled(app.busy || app.cues.isEmpty)
         Divider()
         Button("Duplicate") {
             if !app.clipSelection.contains(clip.id) { app.clipSelection = [clip.id] }
@@ -623,17 +683,23 @@ struct ExportBar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            // Each checkbox is named for VoiceOver: the checkbox style doesn't pass its title on (found by the UI test).
             HStack(spacing: 14) {
                 Toggle("Vertical 9:16", isOn: $app.exportVertical)
+                    .accessibilityLabel("Vertical 9:16")
                     .disabled(app.videoSize == nil)
                     .help("Also make a center-cropped vertical copy (re-encoded)")
                 Toggle("Subtitle file", isOn: $app.exportVTT)
+                    .accessibilityLabel("Subtitle file")
                     .help("A .vtt per clip, re-zeroed to the clip start (upload to Bluesky for closed captions)")
                 Toggle("Burn captions", isOn: $app.burnCaptions)
+                    .accessibilityLabel("Burn captions")
                     .help("Also make a -captioned.mp4 with open captions")
                 Toggle("Frame-accurate", isOn: $app.reencode)
+                    .accessibilityLabel("Frame-accurate")
                     .help("Re-encode the horizontal clip instead of stream copy, so it cuts exactly (stream copy cuts on keyframes)")
                 Toggle("Speaker labels", isOn: $app.keepSpeakerLabels)
+                    .accessibilityLabel("Speaker labels")
                     .help("Keep [SPEAKER_00]: prefixes in subtitle files and captions")
             }
             .toggleStyle(.checkbox)
