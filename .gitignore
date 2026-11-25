@@ -1,1 +1,7 @@
 .claude/settings.local.json
+app/build/
+app/SpeechClipExtractor.xcodeproj/
+# Personal crash reports: they contain device identifiers
+app/crash-log.txt
+# Personal working notes
+app/NOTES.md
