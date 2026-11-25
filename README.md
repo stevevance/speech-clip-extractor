@@ -124,6 +124,16 @@ To share a build, zip it with `ditto -c -k --keepParent "Speech Clip Extractor.a
 
 Signing with a Developer ID and notarizing (Apple Developer Program, $99/year) would remove the "Not Opened" step above. The app can't go in the Mac App Store: App Review Guideline 5.2.3 bars downloading from YouTube and similar sites, and the App Store sandbox would block the Homebrew tools.
 
+## Testing the Mac app
+
+`app/tests/ui-test.sh` is an end-to-end test: it builds a separate copy of the app in a temporary folder, makes a test video and transcript, and drives the app through macOS accessibility scripting (opening a file, the Clip menu, undo and redo, the space bar, export with vertical and burned-in captions), then checks the saved clip list and exported files.
+
+```bash
+bash app/tests/ui-test.sh
+```
+
+It needs Xcode, XcodeGen and ffmpeg, plus Accessibility permission for the app you run it from (System Settings > Privacy & Security > Accessibility). It doesn't touch a copy of the app you have open, makes no AI calls, and deletes its temporary folder when done.
+
 ## Secret checks for contributors
 
 This repo has git hooks in `.githooks/` that use [gitleaks](https://github.com/gitleaks/gitleaks) to block a commit or push containing what looks like a secret (API keys, tokens, private keys). Turn them on once per clone:
