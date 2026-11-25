@@ -66,8 +66,14 @@ final class AppState: ObservableObject {
     @Published var sheet: SheetKind?
     // Clips selected in the clip list (for Delete, Duplicate, Preview and the right-click menu).
     @Published var clipSelection: Set<Clip.ID> = []
-    // This window's undo manager, for undoing clip changes with ⌘Z.
-    weak var undoManager: UndoManager?
+    /*
+     * The undo manager for clip changes: the window's own, which is the one
+     * the Edit menu's Undo and ⌘Z use. SwiftUI's environment undo manager is
+     * only a fallback, because it can still be nil when the window appears,
+     * which left Undo greyed out (found by the automated UI test).
+     */
+    weak var environmentUndoManager: UndoManager?
+    var undoManager: UndoManager? { window?.undoManager ?? environmentUndoManager }
     // This project's window, so the space bar only controls the video in the window in front.
     weak var window: NSWindow?
 

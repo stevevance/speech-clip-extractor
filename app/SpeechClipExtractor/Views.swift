@@ -82,14 +82,14 @@ struct ProjectWindow: View {
             .onAppear {
                 let state = app
                 delegate.register(state)
-                app.undoManager = undoManager
+                app.environmentUndoManager = undoManager
                 spaceBarMonitor = Self.watchSpaceBar(for: state)
             }
             .onDisappear {
                 if let spaceBarMonitor { NSEvent.removeMonitor(spaceBarMonitor) }
                 spaceBarMonitor = nil
             }
-            .onChange(of: undoManager) { _, manager in app.undoManager = manager }
+            .onChange(of: undoManager) { _, manager in app.environmentUndoManager = manager }
     }
 
     /*
@@ -572,6 +572,7 @@ struct ClipRow: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Toggle("Include in export", isOn: $clip.include).labelsHidden()
+                    .accessibilityLabel("Include in export")
                     .help("Include this clip when exporting")
                 TextField("Title", text: $clip.title).textFieldStyle(.roundedBorder)
                     .accessibilityLabel("Clip title")
@@ -682,17 +683,23 @@ struct ExportBar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            // Each checkbox is named for VoiceOver: the checkbox style doesn't pass its title on (found by the UI test).
             HStack(spacing: 14) {
                 Toggle("Vertical 9:16", isOn: $app.exportVertical)
+                    .accessibilityLabel("Vertical 9:16")
                     .disabled(app.videoSize == nil)
                     .help("Also make a center-cropped vertical copy (re-encoded)")
                 Toggle("Subtitle file", isOn: $app.exportVTT)
+                    .accessibilityLabel("Subtitle file")
                     .help("A .vtt per clip, re-zeroed to the clip start (upload to Bluesky for closed captions)")
                 Toggle("Burn captions", isOn: $app.burnCaptions)
+                    .accessibilityLabel("Burn captions")
                     .help("Also make a -captioned.mp4 with open captions")
                 Toggle("Frame-accurate", isOn: $app.reencode)
+                    .accessibilityLabel("Frame-accurate")
                     .help("Re-encode the horizontal clip instead of stream copy, so it cuts exactly (stream copy cuts on keyframes)")
                 Toggle("Speaker labels", isOn: $app.keepSpeakerLabels)
+                    .accessibilityLabel("Speaker labels")
                     .help("Keep [SPEAKER_00]: prefixes in subtitle files and captions")
             }
             .toggleStyle(.checkbox)
