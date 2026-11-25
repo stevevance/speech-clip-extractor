@@ -172,5 +172,3 @@ open "build/Build/Products/Release/Speech Clip Extractor.app"
 ```
 
 To share a build, zip it with `ditto -c -k --keepParent "Speech Clip Extractor.app" Speech-Clip-Extractor.zip` and attach it to a GitHub release. Clip lists save next to each video as `<name>.clips.json`.
-
-Signing with a Developer ID and notarizing (Apple Developer Program, $99/year) would remove the "Not Opened" step above. The app can't go in the Mac App Store: App Review Guideline 5.2.3 bars downloading from YouTube and similar sites, and the App Store sandbox would block the Homebrew tools.
