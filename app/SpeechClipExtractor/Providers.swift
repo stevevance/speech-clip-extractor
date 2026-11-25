@@ -272,7 +272,8 @@ enum OpenAICompatibleClient {
         }
 
         // Some models wrap JSON in ``` fences or add a sentence; keep just the outermost { … }.
-        guard let open = content.firstIndex(of: "{"), let close = content.lastIndex(of: "}") else {
+        // close must come after open: a reply with a stray "}" before the JSON would otherwise crash the slice below.
+        guard let open = content.firstIndex(of: "{"), let close = content.lastIndex(of: "}"), close > open else {
             throw ToolError.message("\(model) didn't reply with JSON. Try another model. It began: \(replyExcerpt(content))")
         }
         struct Envelope: Decodable { let highlights: [HighlightSuggestion] }

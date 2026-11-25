@@ -175,38 +175,6 @@ struct SpendingLimitTip: View {
     }
 }
 
-// MARK: - Denoise
-
-struct DenoiseSheet: View {
-    @EnvironmentObject var app: AppState
-    @Environment(\.dismiss) private var dismiss
-    @State private var noiseFloor = -25.0
-
-    var body: some View {
-        Form {
-            Text("Remove background noise").font(.headline)
-            Text("Runs ffmpeg's afftdn denoiser on the whole source and switches to the cleaned copy (\"…clean.mp4\"). Your transcript and clips carry over.")
-                .font(.caption).foregroundStyle(.secondary)
-            Slider(value: $noiseFloor, in: -40 ... -15, step: 1) {
-                Text("Noise floor: \(Int(noiseFloor)) dB")
-            }
-            Text("Lower values remove more noise but can make speech sound watery. -25 is a good start.")
-                .font(.caption).foregroundStyle(.secondary)
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Remove Noise") {
-                    app.denoise(noiseFloor: Int(noiseFloor))
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(20)
-        .frame(width: 480)
-    }
-}
-
 // MARK: - Settings
 
 struct SettingsView: View {

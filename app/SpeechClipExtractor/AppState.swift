@@ -62,7 +62,7 @@ final class AppState: ObservableObject {
     // A finished-step message shown in a green bar at the top of the window.
     @Published var notice: String?
     @Published var showSetup = false
-    // The sheet open on this window (download, transcribe, suggest, denoise).
+    // The sheet open on this window (download, transcribe, suggest).
     @Published var sheet: SheetKind?
     // Clips selected in the clip list (for Delete, Duplicate, Preview and the right-click menu).
     @Published var clipSelection: Set<Clip.ID> = []
@@ -189,14 +189,22 @@ final class AppState: ObservableObject {
     /*
      * Opens a video (or audio file). A VTT with the same base name next to
      * it is loaded as the transcript, and a saved clip list is restored.
-     * keepWork carries the current transcript and clips over, for when the
-     * source is swapped for its denoised copy.
      */
-    func openVideo(_ url: URL, keepWork: Bool = false) {
-        if let timeObserver, let player { player.removeTimeObserver(timeObserver) }
-        player?.pause()
+    func openVideo(_ url: URL) {
+        /*
+         * Both observers belong to the old player and must come off it before
+         * it's replaced: removing one from a different player later throws an
+         * exception and crashes the app (a preview still running when another
+         * video opens).
+         */
+        if let player {
+            if let timeObserver { player.removeTimeObserver(timeObserver) }
+            if let previewObserver { player.removeTimeObserver(previewObserver) }
+            player.pause()
+        }
+        timeObserver = nil
+        previewObserver = nil
 
-        let keptCues = cues, keptClips = clips, keptVTT = vttURL
         videoURL = url
         videoSize = nil
         duration = 0
@@ -216,23 +224,16 @@ final class AppState: ObservableObject {
         undoManager?.removeAllActions()
         clipSelection = []
         loadingClips = true
-        if keepWork {
-            cues = keptCues
-            vttURL = keptVTT
-            clips = keptClips
-        } else {
-            cues = []
-            vttURL = nil
-            clips = []
-            cueSelection = []
-            let sidecar = base.appendingPathExtension("vtt")
-            if FileManager.default.fileExists(atPath: sidecar.path) {
-                loadTranscript(sidecar)
-            }
-            loadClips()
+        cues = []
+        vttURL = nil
+        clips = []
+        cueSelection = []
+        let sidecar = base.appendingPathExtension("vtt")
+        if FileManager.default.fileExists(atPath: sidecar.path) {
+            loadTranscript(sidecar)
         }
+        loadClips()
         loadingClips = false
-        if keepWork { saveClips() }
 
         notice = nil
         appendLog("Opened \(url.path)")
@@ -250,21 +251,32 @@ final class AppState: ObservableObject {
         }
     }
 
-    // Reads the video's width, height and duration with ffprobe.
+    /*
+     * Reads the video's displayed width and height and its duration with
+     * ffprobe. Phone video is often stored sideways with a rotation tag; ffmpeg
+     * turns it upright when encoding, so for a 90° or 270° rotation the stored
+     * width and height are swapped to match what ffmpeg (and the viewer) sees.
+     */
     func probe() async {
         guard let url = videoURL, let ffprobe = Tools.find("ffprobe") else { return }
         do {
             let (status, output) = try await ProcessRunner.run(ffprobe, [
                 "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=width,height:format=duration",
+                "-show_entries", "stream=width,height:stream_side_data=rotation:stream_tags=rotate:format=duration",
                 "-of", "json", url.path,
             ]) { _, _ in }
             guard status == 0 else { return }
+            // A slower probe of a video that's since been replaced mustn't overwrite the new one's values.
+            guard videoURL == url else { return }
             let data = Data(output.lines.joined(separator: "\n").utf8)
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
             if let stream = (json["streams"] as? [[String: Any]])?.first,
                let w = stream["width"] as? Int, let h = stream["height"] as? Int {
-                videoSize = CGSize(width: w, height: h)
+                let sideRotation = (stream["side_data_list"] as? [[String: Any]])?
+                    .compactMap { ($0["rotation"] as? NSNumber)?.intValue }.first
+                let tagRotation = ((stream["tags"] as? [String: Any])?["rotate"] as? String).flatMap { Int($0) }
+                let quarterTurns = abs(sideRotation ?? tagRotation ?? 0) % 180 == 90
+                videoSize = quarterTurns ? CGSize(width: h, height: w) : CGSize(width: w, height: h)
             }
             if let format = json["format"] as? [String: Any],
                let d = format["duration"] as? String, let seconds = Double(d) {

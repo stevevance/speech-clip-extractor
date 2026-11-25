@@ -118,6 +118,27 @@ final class LineBuffer: @unchecked Sendable {
 }
 
 enum ProcessRunner {
+    // Every process started by pid, its children's children and so on, found with pgrep.
+    static func descendants(of pid: Int32) -> [Int32] {
+        var found: [Int32] = []
+        var queue = [pid]
+        while let parent = queue.popLast() {
+            let pgrep = Process()
+            pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+            pgrep.arguments = ["-P", String(parent)]
+            let pipe = Pipe()
+            pgrep.standardOutput = pipe
+            pgrep.standardError = FileHandle.nullDevice
+            guard (try? pgrep.run()) != nil else { continue }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            pgrep.waitUntilExit()
+            let children = String(decoding: data, as: UTF8.self).split(separator: "\n").compactMap { Int32($0) }
+            found += children
+            queue += children
+        }
+        return found
+    }
+
     /*
      * Runs a tool and waits for it, streaming its output (stdout and stderr
      * merged) to onLine. Cancelling the Swift task terminates the process.
@@ -169,7 +190,17 @@ enum ProcessRunner {
                 }
             }
         } onCancel: {
-            if process.isRunning { process.terminate() }
+            /*
+             * Stop the tool's own children first (yt-dlp's ffmpeg, mlx_whisper's
+             * decoder): they inherit the output pipe, and the job can't finish
+             * while any of them still holds it open.
+             */
+            if process.isRunning {
+                for child in descendants(of: process.processIdentifier).reversed() {
+                    kill(child, SIGTERM)
+                }
+                process.terminate()
+            }
         }
 
         if Task.isCancelled { throw CancellationError() }

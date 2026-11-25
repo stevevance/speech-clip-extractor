@@ -104,9 +104,6 @@ struct ProjectCommands: Commands {
             Button("Suggest Highlights…") { app?.sheet = .suggest }
                 .keyboardShortcut("l", modifiers: [.command, .shift])
                 .disabled(app?.cues.isEmpty ?? true || app!.busy)
-            Button("Remove Noise…") { app?.sheet = .denoise }
-                .keyboardShortcut("n", modifiers: [.command, .option])
-                .disabled(app?.videoURL == nil || app!.busy)
             Divider()
             Button("Add Clip from Selection") { app?.addClipFromSelection() }
                 .keyboardShortcut("k")
@@ -145,7 +142,7 @@ struct ProjectCommands: Commands {
 // MARK: - Main window
 
 enum SheetKind: String, Identifiable {
-    case download, transcribe, suggest, denoise
+    case download, transcribe, suggest
     var id: String { rawValue }
 }
 
@@ -204,11 +201,6 @@ struct ContentView: View {
                     .help("Ask AI to pick quotable moments (⇧⌘L)")
                     .disabled(app.busy || app.cues.isEmpty)
             }
-            ToolbarItem(id: "denoise", placement: .automatic) {
-                Button { app.sheet = .denoise } label: { Label("Remove Noise", systemImage: "speaker.wave.2") }
-                    .help("Clean up buzzing or background noise with ffmpeg afftdn (⌥⌘N)")
-                    .disabled(app.busy || app.videoURL == nil)
-            }
             ToolbarItem(id: "export", placement: .automatic, showsByDefault: false) {
                 Button { app.exportClips() } label: { Label("Export Clips", systemImage: "square.and.arrow.up") }
                     .help("Export the ticked clips (⌘E)")
@@ -220,7 +212,6 @@ struct ContentView: View {
             case .download: DownloadSheet()
             case .transcribe: TranscribeSheet()
             case .suggest: SuggestSheet()
-            case .denoise: DenoiseSheet()
             }
         }
         .sheet(isPresented: $app.showSetup) { SetupView() }

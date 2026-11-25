@@ -4,7 +4,7 @@ import Foundation
 /*
  * The skill's steps, each run as a job: download from any URL (yt-dlp), transcribe
  * (mlx_whisper, optionally with pyannote diarization), suggest highlights
- * (Claude), denoise (ffmpeg afftdn) and export clips (ffmpeg).
+ * (Claude, OpenRouter or DeepInfra) and export clips (ffmpeg).
  */
 extension AppState {
     // MARK: - Step 0a: download a video from a URL
@@ -155,10 +155,17 @@ extension AppState {
         }
         let python = try await findDiarizationPython()
         let script = try writeDiarizationScript()
-        let transcriptJSON = vtt.deletingPathExtension().appendingPathExtension("transcript.json")
+        /*
+         * The saved Whisper transcript is named by model and language, so a run
+         * with a different model or language never reuses another one's text.
+         * e.g. "talk-whisper.whisper-large-v3-turbo.en.transcript.json"
+         */
+        let modelName = model.split(separator: "/").last.map(String.init) ?? model
+        let transcriptJSON = vtt.deletingPathExtension()
+            .appendingPathExtension("\(slugify(modelName)).\(slugify(language)).transcript.json")
 
-        // Stage 1 can be skipped when an earlier run already saved the Whisper transcript.
-        if FileManager.default.fileExists(atPath: transcriptJSON.path) {
+        // Stage 1 can be skipped when an earlier run with the same settings saved a complete transcript.
+        if let data = try? Data(contentsOf: transcriptJSON), (try? JSONSerialization.jsonObject(with: data)) is [Any] {
             appendLog("Reusing \(transcriptJSON.lastPathComponent) from an earlier run (delete it to re-transcribe).")
         } else {
             try await exec("/usr/bin/env", offlineIfCached(model) + [
@@ -256,30 +263,6 @@ extension AppState {
         }
     }
 
-    // MARK: - Audio noise removal
-
-    /*
-     * FFT denoiser on the whole source, video stream copied. nf is the noise
-     * floor in dB: lower (e.g. -35) removes more but can hurt speech. The
-     * cleaned file becomes the source; the transcript and clips carry over.
-     */
-    func denoise(noiseFloor: Int) {
-        guard let video = videoURL else { return }
-        startJob("Remove noise") {
-            let ffmpeg = try Tools.require("ffmpeg")
-            let out = video.deletingPathExtension()
-                .appendingPathExtension("clean")
-                .appendingPathExtension(video.pathExtension.isEmpty ? "mp4" : video.pathExtension)
-            try await self.exec(ffmpeg, [
-                "-nostdin", "-y", "-i", video.path,
-                "-af", "afftdn=nf=\(noiseFloor)",
-                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-                out.path,
-            ])
-            self.openVideo(out, keepWork: true)
-        }
-    }
-
     // MARK: - Steps 4-5: export clips
 
     /*
@@ -302,7 +285,7 @@ extension AppState {
         let vertical = exportVertical, writeVTT = exportVTT, burn = burnCaptions || openCaptions
         let reencode = self.reencode, keepSpeakers = keepSpeakerLabels
         let cues = self.cues, size = videoSize
-        let font = Pref.string(Pref.captionFont, "Proxima Nova")
+        let font = safeFontName(Pref.string(Pref.captionFont, "Proxima Nova"))
         let fontSize = UserDefaults.standard.object(forKey: Pref.captionSize) as? Int ?? 22
 
         if vertical && size == nil {
@@ -324,7 +307,6 @@ extension AppState {
                 let base = String(format: "%02d-", number) + slugify(clip.title)
                 self.status = "Clip \(index + 1) of \(chosen.count): \(clip.title)"
                 self.appendLog("Clip \(index + 1): \(clip.title) (\(Timecode.format(clip.start))–\(Timecode.format(clip.end)))")
-                var made: [URL] = []
 
                 /*
                  * Horizontal, always. Stream copy keeps the original quality but
@@ -337,20 +319,17 @@ extension AppState {
                             "-i", video.path, "-map_chapters", "-1"]
                 args += reencode ? self.h264Args() : ["-c", "copy"]
                 try await self.exec(ffmpeg, args + [horizontal.path])
-                made.append(horizontal)
 
-                // Vertical 9:16 center crop: width = height × 9/16 (kept even), centered.
+                // Vertical 9:16 center crop of the displayed (upright) frame.
+                var cropFilter: String?
                 if vertical, let size {
-                    let h = Int(size.height), w = Int(size.width)
-                    var cropW = Int((Double(h) * 9 / 16).rounded())
-                    cropW -= cropW % 2
-                    let x = max(0, (w - cropW) / 2)
+                    let crop = verticalCrop(width: Int(size.width), height: Int(size.height))
+                    cropFilter = "crop=\(crop.width):\(crop.height):\(crop.x):\(crop.y)"
                     let verticalURL = outDir.appendingPathComponent(base + "-vertical.mp4")
                     try await self.exec(ffmpeg, [
                         "-nostdin", "-y", "-ss", String(clip.start), "-to", String(clip.end),
-                        "-i", video.path, "-vf", "crop=\(cropW):\(h):\(x):0", "-map_chapters", "-1",
+                        "-i", video.path, "-vf", cropFilter!, "-map_chapters", "-1",
                     ] + self.h264Args() + [verticalURL.path])
-                    made.append(verticalURL)
                 }
 
                 // Re-zeroed subtitles for this clip (also needed for burning).
@@ -363,21 +342,29 @@ extension AppState {
 
                 /*
                  * Open captions with ffmpeg's subtitles filter (Homebrew ffmpeg 9
-                 * has libass). The filter's path is parsed by ffmpeg's filter
-                 * syntax, so ffmpeg runs from the output folder with the bare,
-                 * slugified filename. FontSize is in libass units, which scale
-                 * with the video's height.
+                 * has libass). Each captioned file is cut straight from the source
+                 * and re-encoded, so it starts exactly at the clip's start and the
+                 * re-zeroed captions line up even in players that ignore a
+                 * stream-copied clip's edit list. The vertical version is cropped
+                 * first, so captions are laid out for the narrow frame. The
+                 * filter's path is parsed by ffmpeg's filter syntax, so ffmpeg runs
+                 * from the output folder with the bare, slugified filename.
+                 * FontSize is in libass units, which scale with the video's height.
                  */
                 if burn {
                     let style = "FontName=\(font),Bold=1,FontSize=\(fontSize),PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,MarginV=30"
-                    for source in made {
-                        let captioned = source.deletingPathExtension().lastPathComponent + "-captioned.mp4"
+                    let subtitles = "subtitles=\(vttName):fontsdir=/Library/Fonts:force_style='\(style)'"
+                    var versions: [(name: String, filter: String)] = [(base + "-captioned.mp4", subtitles)]
+                    if let cropFilter {
+                        versions.append((base + "-vertical-captioned.mp4", cropFilter + "," + subtitles))
+                    }
+                    for version in versions {
                         try await self.exec(ffmpeg, [
-                            "-nostdin", "-y", "-i", source.lastPathComponent,
-                            "-vf", "subtitles=\(vttName):fontsdir=/Library/Fonts:force_style='\(style)'",
+                            "-nostdin", "-y", "-ss", String(clip.start), "-to", String(clip.end),
+                            "-i", video.path, "-vf", version.filter, "-map_chapters", "-1",
                             "-c:v", "libx264", "-preset", "medium", "-crf", "20",
                             "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-                            "-c:a", "aac", "-b:a", "160k", captioned,
+                            "-c:a", "aac", "-b:a", "160k", version.name,
                         ], cwd: outDir)
                     }
                     // The VTT was only a means to the burn unless the user asked for it.
@@ -413,6 +400,8 @@ Uses Apple MPS (Metal GPU) for diarization when available.
 import sys, os, json
 
 def seconds_to_vtt_ts(s):
+    # Round to the millisecond first, so a time just under a minute never prints as ":60".
+    s = round(s, 3)
     h = int(s // 3600); m = int((s % 3600) // 60); sec = s % 60
     return f"{h:02d}:{m:02d}:{sec:06.3f}"
 
@@ -434,7 +423,10 @@ if stage == "transcribe":
     # condition_on_previous_text=False prevents hallucination loops on silent or unclear audio.
     result = mlx_whisper.transcribe(audio_path, path_or_hf_repo=model, language=language, condition_on_previous_text=False, verbose=False)
     segments = [{"start": seg["start"], "end": seg["end"], "text": seg["text"].strip()} for seg in result["segments"]]
-    json.dump(segments, open(transcript_json, "w"))
+    # Write to a temp file, then rename: a run killed mid-write never leaves half a transcript behind.
+    with open(transcript_json + ".tmp", "w") as f:
+        json.dump(segments, f)
+    os.replace(transcript_json + ".tmp", transcript_json)
     print(f"Whisper segments: {len(segments)}", flush=True)
     sys.exit(0)
 
