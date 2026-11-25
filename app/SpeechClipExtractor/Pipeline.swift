@@ -222,11 +222,37 @@ extension AppState {
             self.appendLog("Sending \(cues.count) cues to \(provider.currentModel) on \(provider.name) (effort \(Provider.currentEffort))…")
             let result = try await HighlightService.suggest(cues: cues, guidance: guidance, count: count)
             self.appendLog("\(result.model) used \(result.inputTokens) input and \(result.outputTokens) output tokens.")
-            let suggested = result.highlights.map {
-                Clip(title: $0.title, start: $0.start_seconds, end: $0.end_seconds, quote: $0.quote, why: $0.why)
+            // The reply as sent (titles, times and quotes only), so an odd result can be diagnosed. Long replies are cut.
+            let reply = result.rawReply.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.appendLog("AI reply: " + (reply.count > 4000 ? String(reply.prefix(4000)) + "… (cut)" : reply))
+            /*
+             * Keep only usable suggestions: a title and a quote, an end after the
+             * start, and times inside the transcript. A model can return a blank
+             * placeholder (0:00–0:00) instead of nothing, which would otherwise
+             * show up as an empty clip.
+             */
+            let lastCueEnd = cues.map(\.end).max() ?? 0
+            let limit = max(self.duration, lastCueEnd) + 1
+            let suggested = result.highlights.compactMap { h -> Clip? in
+                let title = h.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                let quote = h.quote.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !title.isEmpty, !quote.isEmpty,
+                      h.start_seconds >= 0, h.end_seconds - h.start_seconds >= 0.5,
+                      h.end_seconds <= limit else { return nil }
+                // Start and end on whole transcript lines, so a slightly-off time doesn't cut mid-word.
+                let edges = VTT.snap(cues, start: h.start_seconds, end: h.end_seconds)
+                return Clip(title: title, start: edges.start, end: edges.end, quote: quote, why: h.why)
+            }
+            let skipped = result.highlights.count - suggested.count
+            if skipped > 0 {
+                self.appendLog("Skipped \(skipped) unusable suggestion\(skipped == 1 ? "" : "s") (blank, zero-length or outside the video).")
+            }
+            guard !suggested.isEmpty else {
+                self.notice = "No highlights suggested: the AI didn't find a usable clip in this transcript. Try a longer recording or pick clips yourself."
+                return
             }
             self.setClips(((replace ? [] : self.clips) + suggested).sorted { $0.start < $1.start }, actionName: "Suggest Highlights")
-            self.appendLog("Added \(suggested.count) suggested clips.")
+            self.appendLog("Added \(suggested.count) suggested clip\(suggested.count == 1 ? "" : "s").")
         }
     }
 
@@ -256,14 +282,24 @@ extension AppState {
 
     // MARK: - Steps 4-5: export clips
 
-    func exportClips() {
+    /*
+     * Exports the ticked clips, or just `only` (the right-click menu's Export
+     * Clip). `openCaptions: true` burns in captions whatever the Burn
+     * captions checkbox says; the other export options always follow the
+     * checkboxes.
+     */
+    func exportClips(only: [Clip]? = nil, openCaptions: Bool = false) {
         guard let video = videoURL, let outDir = outputDir else { return }
-        let chosen = clips.filter { $0.include && $0.duration > 0 }
+        let chosen = (only ?? clips.filter(\.include)).filter { $0.duration > 0 }
         guard !chosen.isEmpty else {
-            errorMessage = "Tick at least one clip with an end time after its start."
+            errorMessage = only == nil
+                ? "Tick at least one clip with an end time after its start."
+                : "This clip's end time has to be after its start."
             return
         }
-        let vertical = exportVertical, writeVTT = exportVTT, burn = burnCaptions
+        // Files are numbered by the clip's place in the whole list, so a clip keeps its number however it's exported.
+        let allIDs = clips.map(\.id)
+        let vertical = exportVertical, writeVTT = exportVTT, burn = burnCaptions || openCaptions
         let reencode = self.reencode, keepSpeakers = keepSpeakerLabels
         let cues = self.cues, size = videoSize
         let font = Pref.string(Pref.captionFont, "Proxima Nova")
@@ -284,7 +320,8 @@ extension AppState {
 
             for (index, clip) in chosen.enumerated() {
                 try Task.checkCancellation()
-                let base = String(format: "%02d-", index + 1) + slugify(clip.title)
+                let number = (allIDs.firstIndex(of: clip.id) ?? index) + 1
+                let base = String(format: "%02d-", number) + slugify(clip.title)
                 self.status = "Clip \(index + 1) of \(chosen.count): \(clip.title)"
                 self.appendLog("Clip \(index + 1): \(clip.title) (\(Timecode.format(clip.start))–\(Timecode.format(clip.end)))")
                 var made: [URL] = []

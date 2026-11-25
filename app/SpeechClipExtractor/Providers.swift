@@ -36,9 +36,32 @@ enum Provider: String, CaseIterable, Identifiable {
 
     var keyPage: URL {
         switch self {
-        case .anthropic: return URL(string: "https://console.anthropic.com/settings/keys")!
+        case .anthropic: return URL(string: "https://platform.claude.com/settings/keys")!
         case .openrouter: return URL(string: "https://openrouter.ai/settings/keys")!
         case .deepinfra: return URL(string: "https://deepinfra.com/dash/api_keys")!
+        }
+    }
+
+    /*
+     * Where to cap spending, and a one-line tip in each provider's own terms,
+     * so a leaked key or an unexpectedly big job can't run up a large bill.
+     */
+    var spendingLimitPage: URL {
+        switch self {
+        case .anthropic: return URL(string: "https://platform.claude.com/settings/limits")!
+        case .openrouter: return URL(string: "https://openrouter.ai/settings/keys")!
+        case .deepinfra: return URL(string: "https://deepinfra.com/dash/billing")!
+        }
+    }
+
+    var spendingLimitTip: String {
+        switch self {
+        case .anthropic:
+            return "Tip: set a monthly spend limit in your Anthropic account, so a leaked key or a big job can't run up a large bill."
+        case .openrouter:
+            return "Tip: OpenRouter is prepaid, and you can also give this API key its own credit limit, so a leaked key can't drain your credits."
+        case .deepinfra:
+            return "Tip: set a spending limit on your DeepInfra Billing page, so a leaked key or a big job can't run up a large bill."
         }
     }
 
@@ -250,14 +273,14 @@ enum OpenAICompatibleClient {
 
         // Some models wrap JSON in ``` fences or add a sentence; keep just the outermost { … }.
         guard let open = content.firstIndex(of: "{"), let close = content.lastIndex(of: "}") else {
-            throw ToolError.message("\(model) didn't reply with JSON. Try another model.")
+            throw ToolError.message("\(model) didn't reply with JSON. Try another model. It began: \(replyExcerpt(content))")
         }
         struct Envelope: Decodable { let highlights: [HighlightSuggestion] }
         let envelope: Envelope
         do {
             envelope = try JSONDecoder().decode(Envelope.self, from: Data(content[open...close].utf8))
         } catch {
-            throw ToolError.message("\(model)'s reply didn't match the expected format. Try another model.")
+            throw ToolError.message("\(model)'s reply didn't match the expected format. Try another model. It began: \(replyExcerpt(content))")
         }
 
         let usage = json["usage"] as? [String: Any]
@@ -265,7 +288,8 @@ enum OpenAICompatibleClient {
             highlights: envelope.highlights,
             inputTokens: usage?["prompt_tokens"] as? Int ?? 0,
             outputTokens: usage?["completion_tokens"] as? Int ?? 0,
-            model: json["model"] as? String ?? model
+            model: json["model"] as? String ?? model,
+            rawReply: content
         )
     }
 }

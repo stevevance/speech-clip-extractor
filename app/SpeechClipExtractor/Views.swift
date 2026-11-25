@@ -574,11 +574,27 @@ struct ClipMenu: View {
     @EnvironmentObject var app: AppState
     let clip: Clip
 
+    // The selection when the clicked clip is part of it, otherwise just the clicked clip.
+    private var targets: [Clip] {
+        app.clipSelection.contains(clip.id) ? app.selectedClips : [clip]
+    }
+
     var body: some View {
         Button("Preview") { app.preview(clip) }
         Button("Set Start to Playhead") { app.setStart(of: clip, to: app.currentTime) }
         Button("Set End to Playhead") { app.setEnd(of: clip, to: app.currentTime) }
         Button("Jump to Start") { app.seek(to: clip.start) }
+        Divider()
+        Divider()
+        // Export just this clip (or the selection it's part of), with or without open captions.
+        Button(targets.count > 1 ? "Export \(targets.count) Selected Clips" : "Export Clip") {
+            app.exportClips(only: targets)
+        }
+        .disabled(app.busy)
+        Button(targets.count > 1 ? "Export \(targets.count) Selected Clips with Open Captions" : "Export Clip with Open Captions") {
+            app.exportClips(only: targets, openCaptions: true)
+        }
+        .disabled(app.busy || app.cues.isEmpty)
         Divider()
         Button("Duplicate") {
             if !app.clipSelection.contains(clip.id) { app.clipSelection = [clip.id] }
