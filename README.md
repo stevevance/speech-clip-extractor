@@ -2,7 +2,35 @@
 
 A workflow for extracting highlight clips from speech videos using VTT subtitle files and ffmpeg. Includes horizontal (16:9) and vertical (9:16) crop versions for multi-platform publishing.
 
-## What It Does
+It comes two ways: a **Mac app** you can download, and a **Claude Code skill** (`SKILL.md`) that walks Claude through the same steps.
+
+## Mac app
+
+**[Download the latest version from Releases](https://github.com/stevevance/speech-clip-extractor/releases)** (`Speech-Clip-Extractor-x.x.zip`). Requires macOS 15 or later.
+
+The app does the whole workflow in one window:
+
+- Open a video, drop one on the window, or download one from a URL (YouTube, Vimeo, news sites and more, via yt-dlp)
+- Transcribe it with Whisper on your Mac, optionally with speaker labels
+- Pick clips by selecting transcript lines, or have AI suggest highlights (Anthropic, OpenRouter or DeepInfra, with your own API key)
+- Export horizontal and vertical clips, a subtitle file for each clip, and versions with burned-in captions
+- Remove background noise from the recording
+
+### Installing it
+
+1. Download the zip from [Releases](https://github.com/stevevance/speech-clip-extractor/releases), unzip it, and move **Speech Clip Extractor** to your Applications folder.
+2. Open it. Because the app isn't signed with an Apple Developer ID yet, macOS shows **"Speech Clip Extractor.app" Not Opened: Apple could not verify "Speech Clip Extractor.app" is free of malware…** Click **Done** (not Move to Trash).
+3. Open **System Settings > Privacy & Security** and scroll down to Security. Next to "Speech Clip Extractor.app was blocked to protect your Mac," click **Open Anyway**, then confirm with your password or Touch ID. The button appears for about an hour after you try to open the app. You only do this once.
+
+   Prefer Terminal? This does the same thing:
+
+   ```bash
+   xattr -dr com.apple.quarantine "/Applications/Speech Clip Extractor.app"
+   ```
+4. Choose **Check Setup…** from the app menu. It lists the free tools the app uses (ffmpeg, yt-dlp, mlx-whisper and more) and gives the Homebrew command to install anything missing. Transcribing needs an Apple Silicon Mac.
+5. To use Suggest Highlights, add your API key in **Settings** (⌘,). Keys are stored only in your Mac's Keychain.
+
+## What the skill does
 
 1. Reads an auto-generated VTT subtitle file from a video platform (e.g. Vimeo). You can also use OpenAI Whisper to transcribe audio, but I didn't use that because I already had the VTT subtitle file that Vimeo generated. 
 2. Identifies the most interesting or quotable moments with timestamps
@@ -104,11 +132,9 @@ x_offset    = (source_width − crop_width) / 2
 crop filter = crop=crop_width:source_height:x_offset:0
 ```
 
-## macOS app
+## Building the Mac app from source
 
-`app/` is a SwiftUI version of this workflow: open or download a video, transcribe it (with optional speaker labels), pick clips by hand or with Claude, and export horizontal, vertical, VTT and captioned versions. It runs the same tools as the skill (ffmpeg, yt-dlp, mlx_whisper, pyannote).
-
-Build it:
+The app's code is in `app/` (SwiftUI). It needs Xcode and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`):
 
 ```bash
 cd app
@@ -117,15 +143,6 @@ xcodebuild -project SpeechClipExtractor.xcodeproj -scheme SpeechClipExtractor -c
 open "build/Build/Products/Release/Speech Clip Extractor.app"
 ```
 
-Add your Anthropic API key in Settings (⌘,) to use Suggest Highlights. Clip lists save next to the video as `<name>.clips.json`.
+To share a build, zip it with `ditto -c -k --keepParent "Speech Clip Extractor.app" Speech-Clip-Extractor.zip` and attach it to a GitHub release. Clip lists save next to each video as `<name>.clips.json`.
 
-### Sharing the app
-
-The app isn't signed with an Apple Developer ID yet, so macOS blocks it on other Macs at first:
-
-1. Zip the built app (right-click it in Finder > Compress) and send the zip.
-2. The recipient unzips it, moves it to Applications and opens it. When macOS says it can't check the app, they go to System Settings > Privacy & Security, scroll down and click **Open Anyway**. This is needed once.
-3. They install the tools it uses. The app's **Check Setup…** window (app menu) lists anything missing with the Homebrew command to install it. Transcribing needs an Apple Silicon Mac.
-4. For Suggest Highlights they add their own Anthropic, OpenRouter or DeepInfra API key in Settings. Keys are stored in their Keychain only.
-
-Signing with a Developer ID and notarizing (Apple Developer Program, $99/year) removes step 2. The app can't go in the Mac App Store: App Review Guideline 5.2.3 bars downloading from YouTube and similar sites, and the App Store sandbox would block the Homebrew tools.
+Signing with a Developer ID and notarizing (Apple Developer Program, $99/year) would remove the "Not Opened" step above. The app can't go in the Mac App Store: App Review Guideline 5.2.3 bars downloading from YouTube and similar sites, and the App Store sandbox would block the Homebrew tools.
