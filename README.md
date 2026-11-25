@@ -152,13 +152,16 @@ To share a build, zip it with `ditto -c -k --keepParent "Speech Clip Extractor.a
 
 ## Testing the Mac app
 
-`app/tests/ui-test.sh` is an end-to-end test: it builds a separate copy of the app in a temporary folder, makes a test video and transcript, and drives the app through macOS accessibility scripting (opening a file, the Clip menu, undo and redo, the space bar, export with vertical and burned-in captions), then checks the saved clip list and exported files.
+`app/tests/ui-test.sh` is an end-to-end test: it builds a separate copy of the app, makes a test video and transcript, and drives the app through macOS accessibility scripting (opening a file, adding a clip, export with vertical and burned-in captions, duplicate, undo and redo, the space bar, deleting a clip), then checks the saved clip list and exported files.
 
 ```bash
-bash app/tests/ui-test.sh
+bash app/tests/ui-test.sh           # 27 checks, about 40 seconds once built
+bash app/tests/ui-test.sh --quiet   # 21 checks, never brings the app forward
 ```
 
-It needs Xcode, XcodeGen and ffmpeg, plus Accessibility permission for the app you run it from (System Settings > Privacy & Security > Accessibility). It doesn't touch a copy of the app you have open, makes no AI calls, and deletes its temporary folder when done.
+The test copy opens in the background and its buttons are pressed without moving the mouse, so you can keep working. Only the keyboard checks (duplicate, undo, redo and the space bar) need the app in front, for about 3 seconds near the end, and then the app you were using comes back. Don't type during those seconds. `--quiet` skips them. The test copy opens no Finder window and shows no notifications.
+
+It needs Xcode, XcodeGen and ffmpeg, plus Accessibility permission for the app you run it from (System Settings > Privacy & Security > Accessibility). It doesn't touch a copy of the app you have open and makes no AI calls. The build is kept in your temporary folder between runs; everything else is deleted when it finishes.
 
 ## Secret checks for contributors
 

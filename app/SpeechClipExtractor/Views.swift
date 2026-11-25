@@ -509,6 +509,7 @@ struct PlayerPane: View {
             HStack {
                 Text("\(Timecode.format(app.currentTime)) / \(Timecode.format(app.duration))")
                     .font(.system(.body, design: .monospaced))
+                    .accessibilityIdentifier("playheadTime")
                 if let size = app.videoSize {
                     Text("\(Int(size.width))×\(Int(size.height))").foregroundStyle(.secondary)
                 } else {
@@ -516,6 +517,7 @@ struct PlayerPane: View {
                 }
                 Spacer()
                 Button("New Clip at Playhead") { app.addClipAtPlayhead() }
+                    .accessibilityIdentifier("newClipAtPlayhead")
             }
             .padding(8)
         }
@@ -599,6 +601,7 @@ struct ClipRow: View {
                 Button { app.delete(clip) } label: { Image(systemName: "trash") }
                     .help("Remove this clip")
                     .accessibilityLabel("Delete clip")
+                    .accessibilityIdentifier("deleteClip")
             }
             if !clip.quote.isEmpty || !clip.why.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
@@ -687,19 +690,24 @@ struct ExportBar: View {
             HStack(spacing: 14) {
                 Toggle("Vertical 9:16", isOn: $app.exportVertical)
                     .accessibilityLabel("Vertical 9:16")
+                    .accessibilityIdentifier("exportVertical")
                     .disabled(app.videoSize == nil)
                     .help("Also make a center-cropped vertical copy (re-encoded)")
                 Toggle("Subtitle file", isOn: $app.exportVTT)
                     .accessibilityLabel("Subtitle file")
+                    .accessibilityIdentifier("exportVTT")
                     .help("A .vtt per clip, re-zeroed to the clip start (upload to Bluesky for closed captions)")
                 Toggle("Burn captions", isOn: $app.burnCaptions)
                     .accessibilityLabel("Burn captions")
+                    .accessibilityIdentifier("burnCaptions")
                     .help("Also make a -captioned.mp4 with open captions")
                 Toggle("Frame-accurate", isOn: $app.reencode)
                     .accessibilityLabel("Frame-accurate")
+                    .accessibilityIdentifier("frameAccurate")
                     .help("Re-encode the horizontal clip instead of stream copy, so it cuts exactly (stream copy cuts on keyframes)")
                 Toggle("Speaker labels", isOn: $app.keepSpeakerLabels)
                     .accessibilityLabel("Speaker labels")
+                    .accessibilityIdentifier("speakerLabels")
                     .help("Keep [SPEAKER_00]: prefixes in subtitle files and captions")
             }
             .toggleStyle(.checkbox)
@@ -715,6 +723,7 @@ struct ExportBar: View {
                 Button("Export Clips") { app.exportClips() }
                     .buttonStyle(.borderedProminent)
                     .disabled(app.clips.filter(\.include).isEmpty)
+                    .accessibilityIdentifier("exportClips")
             }
         }
         .padding(8)

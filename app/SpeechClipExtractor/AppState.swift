@@ -18,6 +18,13 @@ enum Pref {
     static func string(_ key: String, _ fallback: String) -> String {
         UserDefaults.standard.string(forKey: key) ?? fallback
     }
+
+    /*
+     * Set only by the UI test, as a launch argument (-SCEUITesting YES), which
+     * lasts for that launch and isn't saved. It keeps the test off the user's
+     * screen: no Finder window after an export and no notification banners.
+     */
+    static var uiTesting: Bool { UserDefaults.standard.bool(forKey: "SCEUITesting") }
 }
 
 /*
@@ -193,6 +200,7 @@ final class AppState: ObservableObject {
      */
     func announce(_ title: String, _ body: String) {
         notice = "\(title). \(body)"
+        guard !Pref.uiTesting else { return }
         let center = UNUserNotificationCenter.current()
         center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
             guard granted else { return }

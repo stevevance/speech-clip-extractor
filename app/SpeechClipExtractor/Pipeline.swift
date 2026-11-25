@@ -382,7 +382,7 @@ extension AppState {
             }
             self.appendLog("Saved to \(outDir.path)")
             self.notice = "Exported \(chosen.count) clip\(chosen.count == 1 ? "" : "s") to \(outDir.lastPathComponent)."
-            NSWorkspace.shared.open(outDir)
+            if !Pref.uiTesting { NSWorkspace.shared.open(outDir) }
         }
     }
 
