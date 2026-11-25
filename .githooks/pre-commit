@@ -1,0 +1,12 @@
+#!/bin/sh
+# Blocks a commit when the staged changes contain a secret (API key, token,
+# private key, password). Uses gitleaks; found values are hidden in the output.
+. "$(dirname "$0")/find-gitleaks.sh"
+
+if ! "$GITLEAKS" git --pre-commit --staged --redact --no-banner --verbose; then
+  echo "" >&2
+  echo "Commit blocked: gitleaks found what looks like a secret in the staged changes (listed above)." >&2
+  echo "Remove it (keep keys in the Keychain or an ignored file), then commit again." >&2
+  echo "If it's a false alarm, add the finding's Fingerprint to .gitleaksignore." >&2
+  exit 1
+fi
