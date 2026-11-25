@@ -128,8 +128,23 @@ struct SuggestSheet: View {
             Text("Suggest highlights with AI").font(.headline)
             Text("Sends the whole transcript (\(app.cues.count) cues) to \(Provider.current.currentModel) on \(Provider.current.name). This uses your API key and costs money. Change the provider or model in Settings (⌘,).")
                 .font(.caption).foregroundStyle(.secondary)
-            Stepper("Up to \(count) clip\(count == 1 ? "" : "s")", value: $count, in: 1...30)
-            Text("Suggested for a \(lengthDescription) transcript. The AI may return fewer if it finds fewer good moments.")
+            // A number you can type, with arrows beside it; kept between 1 and 30.
+            LabeledContent("Up to") {
+                HStack(spacing: 6) {
+                    TextField("Clips", value: $count, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 56)
+                        .accessibilityLabel("Number of clips")
+                        .onChange(of: count) { _, newValue in
+                            let clamped = min(30, max(1, newValue))
+                            if clamped != newValue { count = clamped }
+                        }
+                    Stepper("Number of clips", value: $count, in: 1...30).labelsHidden()
+                    Text(count == 1 ? "clip" : "clips")
+                }
+            }
+            Text("Suggested for a \(lengthDescription) transcript. Type any number from 1 to 30. The AI may return fewer if it finds fewer good moments.")
                 .font(.caption).foregroundStyle(.secondary)
             TextField("Guidance (optional)", text: $guidance, prompt: Text("e.g. focus on housing; skip the thank-yous"), axis: .vertical)
                 .lineLimit(2...4)
