@@ -4,10 +4,13 @@ import UserNotifications
 
 /*
  * Receives files sent from Finder (Open With, or dropped on the Dock icon)
- * and hands them to the most recently opened window, like a drop on it.
+ * and hands them to a window, like a drop on it: the window in front, or
+ * else any window still open. Windows are held weakly, so a closed one is
+ * never chosen; with none open, the files wait for the next window.
  */
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
-    var onOpen: (([URL]) -> Void)?
+    private struct OpenWindow { weak var state: AppState? }
+    private var windows: [OpenWindow] = []
     private var pending: [URL] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -20,13 +23,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        if let onOpen { onOpen(urls) } else { pending += urls }
+        MainActor.assumeIsolated {
+            windows.removeAll { $0.state == nil }
+            let target = windows.first { $0.state?.window?.isKeyWindow == true }?.state
+                ?? windows.last?.state
+            if let target { target.handleDrop(urls) } else { pending += urls }
+        }
     }
 
-    // Files that arrived before any window existed.
-    func attach(_ handler: @escaping ([URL]) -> Void) {
-        onOpen = handler
-        if !pending.isEmpty { handler(pending); pending = [] }
+    // A window opened: remember it, and give it any files that arrived while no window was open.
+    func register(_ state: AppState) {
+        MainActor.assumeIsolated {
+            windows.removeAll { $0.state == nil || $0.state === state }
+            windows.append(OpenWindow(state: state))
+            if !pending.isEmpty {
+                state.handleDrop(pending)
+                pending = []
+            }
+        }
     }
 }
 
@@ -67,7 +81,7 @@ struct ProjectWindow: View {
             .background(WindowAccessor { window in app.window = window })
             .onAppear {
                 let state = app
-                delegate.attach { [weak state] urls in state?.handleDrop(urls) }
+                delegate.register(state)
                 app.undoManager = undoManager
                 spaceBarMonitor = Self.watchSpaceBar(for: state)
             }

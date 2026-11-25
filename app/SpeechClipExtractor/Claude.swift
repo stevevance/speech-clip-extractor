@@ -74,7 +74,7 @@ enum ClaudeClient {
         effort: String
     ) async throws -> Result {
         let prompt = userPrompt(cues: cues, guidance: guidance, count: count)
-        var body: [String: Any] = [
+        let body: [String: Any] = [
             "model": model,
             "max_tokens": 16000,
             "system": systemPrompt,
@@ -85,18 +85,35 @@ enum ClaudeClient {
             ],
         ]
 
-        // Haiku has no server-side fallback; the other current models do.
-        if model.contains("haiku") {
-            return try await send(body, apiKey: apiKey, beta: nil)
-        }
-        // If a safety classifier declines, let the API retry on a fallback model it picks.
-        body["fallbacks"] = "default"
-        do {
-            return try await send(body, apiKey: apiKey, beta: "server-side-fallback-2026-07-01")
-        } catch ToolError.message(let text) where text.localizedCaseInsensitiveContains("fallback") {
-            // An account without the fallback beta gets a 400 naming it; retry without fallbacks.
-            body.removeValue(forKey: "fallbacks")
-            return try await send(body, apiKey: apiKey, beta: nil)
+        /*
+         * Two optional settings that not every model or account accepts:
+         * - refusal fallbacks (if a safety classifier declines, the API retries
+         *   on a fallback model it picks); Haiku has none, and an account
+         *   without the beta gets a 400 naming it;
+         * - the effort level, which older models in the live list (e.g. Haiku
+         *   4.5) reject with a 400 naming it.
+         * Each is dropped and the request sent again when a 400 names it.
+         */
+        var useFallbacks = !model.contains("haiku")
+        var useEffort = true
+        while true {
+            var attempt = body
+            if useFallbacks { attempt["fallbacks"] = "default" }
+            if !useEffort, var config = attempt["output_config"] as? [String: Any] {
+                config.removeValue(forKey: "effort")
+                attempt["output_config"] = config
+            }
+            do {
+                return try await send(attempt, apiKey: apiKey, beta: useFallbacks ? "server-side-fallback-2026-07-01" : nil)
+            } catch ToolError.message(let text) where text.hasPrefix("Claude API error 400") {
+                if useFallbacks && text.localizedCaseInsensitiveContains("fallback") {
+                    useFallbacks = false
+                } else if useEffort && text.localizedCaseInsensitiveContains("effort") {
+                    useEffort = false
+                } else {
+                    throw ToolError.message(text)
+                }
+            }
         }
     }
 

@@ -130,6 +130,7 @@ import sys, os
 import torch
 
 def seconds_to_vtt_ts(s):
+    s = round(s, 3)  # round first, so a time just under a minute never prints as ":60"
     h = int(s // 3600); m = int((s % 3600) // 60); sec = s % 60
     return f"{h:02d}:{m:02d}:{sec:06.3f}" if h > 0 else f"{m:02d}:{sec:06.3f}"
 

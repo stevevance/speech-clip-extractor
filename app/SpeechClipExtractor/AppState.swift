@@ -128,8 +128,10 @@ final class AppState: ObservableObject {
         // A private run (downloads) never shows the URL or video ID in the log, the status line or an error.
         let clean: (String) -> String = { isPrivate ? AppState.redact($0) : $0 }
         appendLog(clean("$ \(name) " + args.map(shellQuote).joined(separator: " ")))
-        let (status, output) = try await ProcessRunner.run(executable, args, cwd: cwd) { line, isProgress in
+        let (status, output) = try await ProcessRunner.run(executable, args, cwd: cwd) { line, endedInReturn in
             let shown = clean(line)
+            // A redraw (ends in "\r") or anything shaped like a progress update goes to the status line, not the log.
+            let isProgress = endedInReturn || AppState.looksLikeProgress(line)
             // Hop to the main thread in order (DispatchQueue.main is FIFO).
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -160,6 +162,16 @@ final class AppState: ObservableObject {
     nonisolated static func redact(_ text: String) -> String {
         text.replacingOccurrences(of: #"https?://\S+"#, with: "[URL]", options: .regularExpression)
             .replacingOccurrences(of: #"(\[[^\]]+\] )[^\s:]+:"#, with: "$1…:", options: .regularExpression)
+    }
+
+    /*
+     * yt-dlp's "[download]  12.3% of 40MiB at …" and ffmpeg's "frame= … time= …"
+     * lines are progress updates even when they end in a newline, and would
+     * otherwise fill the log with thousands of lines.
+     */
+    nonisolated static func looksLikeProgress(_ line: String) -> Bool {
+        line.range(of: #"^\[download\]\s+[0-9.]+%"#, options: .regularExpression) != nil
+            || line.range(of: #"^frame=\s*\d+.*time="#, options: .regularExpression) != nil
     }
 
     private func shellQuote(_ s: String) -> String {
@@ -230,9 +242,8 @@ final class AppState: ObservableObject {
         vttURL = nil
         clips = []
         cueSelection = []
-        let sidecar = base.appendingPathExtension("vtt")
-        if FileManager.default.fileExists(atPath: sidecar.path) {
-            loadTranscript(sidecar)
+        if let transcript = newestTranscript(for: url) {
+            loadTranscript(transcript)
         }
         loadClips()
         loadingClips = false
@@ -240,6 +251,27 @@ final class AppState: ObservableObject {
         notice = nil
         appendLog("Opened \(url.path)")
         Task { await probe() }
+    }
+
+    /*
+     * The transcript to load with a video: the newest of "<name>.vtt" and any
+     * "<name>-whisper….vtt" the app made when "<name>.vtt" was already taken.
+     */
+    private func newestTranscript(for video: URL) -> URL? {
+        let folder = video.deletingLastPathComponent()
+        let name = video.deletingPathExtension().lastPathComponent
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let candidates = files.filter { file in
+            file.pathExtension.lowercased() == "vtt" && {
+                let stem = file.deletingPathExtension().lastPathComponent
+                return stem == name || stem.hasPrefix(name + "-whisper")
+            }()
+        }
+        func modified(_ file: URL) -> Date {
+            (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        }
+        return candidates.max { modified($0) < modified($1) }
     }
 
     func loadTranscript(_ url: URL) {
@@ -262,8 +294,9 @@ final class AppState: ObservableObject {
     func probe() async {
         guard let url = videoURL, let ffprobe = Tools.find("ffprobe") else { return }
         do {
+            // "V:0" (capital V) skips attached pictures, so an audio file's cover art isn't taken for video.
             let (status, output) = try await ProcessRunner.run(ffprobe, [
-                "-v", "error", "-select_streams", "v:0",
+                "-v", "error", "-select_streams", "V:0",
                 "-show_entries", "stream=width,height:stream_side_data=rotation:stream_tags=rotate:format=duration",
                 "-of", "json", url.path,
             ]) { _, _ in }
@@ -291,15 +324,22 @@ final class AppState: ObservableObject {
         }
     }
 
+    /*
+     * Files dropped on the window or sent from Finder. Refused while a job
+     * runs, because the job would put its results (a transcript, suggested
+     * clips) into the newly opened video. Videos open first and subtitle files
+     * load after, so a subtitle file dropped with its video isn't cleared when
+     * the video opens.
+     */
     func handleDrop(_ urls: [URL]) {
-        for url in urls {
-            switch url.pathExtension.lowercased() {
-            case "vtt", "srt":
-                loadTranscript(url)
-            default:
-                openVideo(url)
-            }
+        guard !urls.isEmpty else { return }
+        if busy {
+            errorMessage = "Wait for the current job to finish, or cancel it, before opening another file."
+            return
         }
+        let isSubtitle: (URL) -> Bool = { ["vtt", "srt"].contains($0.pathExtension.lowercased()) }
+        for url in urls where !isSubtitle(url) { openVideo(url) }
+        for url in urls where isSubtitle(url) { loadTranscript(url) }
     }
 
     // MARK: - Open panels

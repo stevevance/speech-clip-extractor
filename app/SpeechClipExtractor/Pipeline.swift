@@ -20,8 +20,9 @@ extension AppState {
              * logged into in Safari. The format string prefers H.264 (YouTube's
              * default AV1/VP9 won't play in QuickTime), then falls back to the
              * best a site offers. --print after_move:filepath prints the finished
-             * file's path; --progress and --newline keep the progress lines that
-             * --print would otherwise hide.
+             * file's path; --progress keeps the progress updates that --print
+             * would otherwise hide. They're redrawn with "\r", so they update the
+             * status line instead of filling the log.
              */
             let browser = Pref.string(Pref.cookieBrowser, "safari")
             let downloadArgs = [
@@ -32,7 +33,7 @@ extension AppState {
                 "--ffmpeg-location", ffmpeg,
                 "--concurrent-fragments", "5",
                 "--print", "after_move:filepath",
-                "--progress", "--newline",
+                "--progress",
                 "-o", downloads.path + "/%(title)s.%(ext)s",
                 urlString,
             ]
@@ -96,7 +97,8 @@ extension AppState {
     private func videoCodec(_ file: URL) async throws -> String? {
         let ffprobe = try Tools.require("ffprobe")
         let (status, output) = try await ProcessRunner.run(ffprobe, [
-            "-v", "error", "-select_streams", "v:0",
+            // "V:0" skips attached pictures: a podcast's cover art isn't video and mustn't trigger a re-encode.
+            "-v", "error", "-select_streams", "V:0",
             "-show_entries", "stream=codec_name", "-of", "csv=p=0", file.path,
         ]) { _, _ in }
         guard status == 0 else { return nil }
@@ -109,10 +111,17 @@ extension AppState {
         guard let video = videoURL else { return }
         startJob(diarize ? "Transcribe + diarize" : "Transcribe") {
             let dir = video.deletingLastPathComponent()
-            // "<video>.vtt", or "<video>-whisper.vtt" if that name is taken by an existing transcript.
+            /*
+             * "<video>.vtt", or, if that name is taken by an existing transcript,
+             * one named after the model ("<video>-whisper-large-v3-turbo.vtt"),
+             * so a run with another model doesn't overwrite it. The newest of
+             * these loads with the video next time (AppState.newestTranscript).
+             */
             var name = video.deletingPathExtension().lastPathComponent
             if FileManager.default.fileExists(atPath: dir.appendingPathComponent(name + ".vtt").path) {
-                name += "-whisper"
+                let modelName = model.split(separator: "/").last.map(String.init) ?? model
+                let slug = slugify(modelName.replacingOccurrences(of: "-mlx", with: ""))
+                name += slug.hasPrefix("whisper") ? "-" + slug : "-whisper-" + slug
             }
             let vtt = dir.appendingPathComponent(name + ".vtt")
             let lang = language.trimmingCharacters(in: .whitespaces).isEmpty ? "en" : language
